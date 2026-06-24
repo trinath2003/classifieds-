@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ClassifiedsDesk — Deccan Chronicle</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+:root{
+  --bg:#1a1a1a;--bg2:#242424;--bg3:#2e2e2e;--bg4:#383838;--bd:#3a3a3a;
+  --tx:#f0f0f0;--tx2:#aaa;--tx3:#666;
+  --green:#1D9E75;--greenl:#1a3d2e;--amber:#EF9F27;--amberl:#3d2e1a;--red:#e24b4a
+}
+body{background:var(--bg);color:var(--tx);font-size:14px}
+
+/* ── pages ── */
+.page{display:none}.page.on{display:block}
+
+/* ── topbar ── */
+.bar{
+  background:var(--bg2);border-bottom:1px solid var(--bd);
+  padding:10px 16px;display:flex;align-items:center;gap:10px;
+  position:sticky;top:0;z-index:20
+}
+.logo{font-size:15px;font-weight:700;white-space:nowrap}.logo b{color:var(--green)}
+.logo small{font-size:10px;color:var(--tx3);font-weight:400;margin-left:4px}
+.sw{flex:1;display:flex;align-items:center;background:var(--bg3);border:1px solid var(--bd);border-radius:10px;padding:0 10px;gap:8px}
+.sw input{flex:1;background:none;border:none;outline:none;font-size:13px;color:var(--tx);padding:8px 0}
+.sw input::placeholder{color:var(--tx3)}
+.live{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--tx2);white-space:nowrap}
+.ldot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+.ldot.scraping{background:var(--amber)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.postbtn{background:var(--tx);color:#111;border:none;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.postbtn:hover{background:#ccc}
+
+/* ── layout ── */
+.layout{display:grid;grid-template-columns:200px 1fr;align-items:start}
+.side{background:var(--bg2);border-right:1px solid var(--bd);padding:10px 0;position:sticky;top:47px;max-height:calc(100vh - 47px);overflow-y:auto}
+.sh{font-size:10px;font-weight:700;color:var(--tx3);padding:8px 14px 4px;letter-spacing:.08em;text-transform:uppercase}
+.ci{display:flex;align-items:center;justify-content:space-between;padding:7px 14px;cursor:pointer;font-size:12px;color:var(--tx2);border-left:3px solid transparent}
+.ci:hover{background:var(--bg3);color:var(--tx)}
+.ci.on{background:var(--bg3);color:var(--green);font-weight:700;border-left-color:var(--green)}
+.ci-l{display:flex;align-items:center;gap:8px}
+.cc{font-size:10px;background:var(--bg4);color:var(--tx2);padding:1px 6px;border-radius:99px}
+.ci.on .cc{background:#1D9E7522;color:var(--green)}
+.si{padding:4px 14px 4px 34px;font-size:11px;color:var(--tx3);cursor:pointer;display:flex;justify-content:space-between}
+.si:hover,.si.on{color:var(--green)}
+.sep{height:1px;background:var(--bd);margin:6px 0}
+
+/* ── day pills — now date-aware ── */
+.day-section{padding:2px 14px 10px}
+.day-loading{font-size:11px;color:var(--tx3);padding:6px 0}
+.dpill{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:5px 8px;border-radius:8px;border:1px solid var(--bd);
+  color:var(--tx3);cursor:pointer;background:var(--bg3);margin-bottom:4px;
+  font-size:11px;transition:all .15s
+}
+.dpill:hover,.dpill.on{border-color:var(--green);color:var(--green);background:var(--greenl)}
+.dpill-left{display:flex;flex-direction:column;gap:1px}
+.dpill-day{font-weight:700;font-size:12px}
+.dpill-date{font-size:9px;opacity:.7}
+.dpill-count{font-size:10px;background:var(--bg4);padding:1px 5px;border-radius:99px}
+.dpill.on .dpill-count{background:#1D9E7522;color:var(--green)}
+.dpill-all{font-size:11px;padding:5px 8px;margin-bottom:6px}
+
+/* ── main area ── */
+.main{padding:14px 16px;min-height:600px}
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.tinfo{font-size:12px;color:var(--tx2);flex:1}.tinfo b{color:var(--tx)}
+.sortsel{background:var(--bg3);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:12px;padding:6px 8px;outline:none;cursor:pointer}
+.scrape-btn{font-size:11px;background:var(--bg3);border:1px solid var(--bd);border-radius:7px;color:var(--tx2);padding:5px 10px;cursor:pointer;white-space:nowrap}
+.scrape-btn:hover{border-color:var(--amber);color:var(--amber)}
+.scrape-btn.loading{border-color:var(--amber);color:var(--amber);opacity:.7;cursor:wait}
+
+/* ── active filter chips ── */
+.chips{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+.chip{font-size:11px;background:var(--greenl);border:1px solid #1D9E7533;color:var(--green);padding:3px 9px 3px 7px;border-radius:99px;display:flex;align-items:center;gap:4px;cursor:pointer}
+.chip:hover{background:#0f2e1f}
+
+/* ── grid ── */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.card{background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:14px;cursor:pointer;transition:border-color .15s}
+.card:hover{border-color:var(--green);background:var(--bg3)}
+.card-top{display:flex;gap:10px;margin-bottom:10px}
+.cico{width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.ip{background:#1a3d2e}.im{background:#3d1a2e}.ij{background:#1a2a3d}.ia{background:#3d2e1a}.io{background:#2a2a2a}
+.cinfo{flex:1;min-width:0}
+.csno{font-size:10px;color:var(--tx3);margin-bottom:2px}
+.ctit{font-size:13px;font-weight:600;color:var(--tx);line-height:1.35;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cloc{font-size:11px;color:var(--tx3);margin-bottom:4px}
+.cprice{font-size:15px;font-weight:700;color:var(--green)}
+.cmeta{margin-bottom:8px}
+.mpill{font-size:10px;padding:2px 7px;border-radius:99px;border:1px solid var(--bd);color:var(--tx3)}
+.cfoot{display:flex;align-items:center;justify-content:space-between;padding-top:8px;border-top:1px solid var(--bd)}
+.badge{font-size:10px;padding:2px 7px;border-radius:99px;font-weight:700;border:1px solid}
+.bs{background:var(--amberl);color:var(--amber);border-color:#63380644}
+.bp{background:#2a2a2a;color:#aaa;border-color:#444}
+.bsl{background:var(--greenl);color:var(--green);border-color:#1D9E7533}
+.cdate{font-size:10px;color:var(--tx3)}
+
+/* ── skeleton loader ── */
+.skel{background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:14px;min-height:140px;animation:shimmer 1.5s infinite}
+@keyframes shimmer{0%,100%{opacity:.4}50%{opacity:.9}}
+.skel-line{height:10px;background:var(--bg4);border-radius:4px;margin-bottom:8px}
+.skel-line.wide{width:80%}.skel-line.med{width:60%}.skel-line.short{width:40%}
+
+/* ── empty/error states ── */
+.empty{grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--tx3);font-size:13px}
+.empty h3{font-size:16px;margin-bottom:8px;color:var(--tx2)}
+.empty p{font-size:12px;line-height:1.7;max-width:320px;margin:0 auto 16px}
+.empty-btn{background:var(--green);color:#fff;border:none;border-radius:8px;padding:9px 20px;font-size:12px;font-weight:700;cursor:pointer}
+
+/* ── pagination ── */
+.pager{display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;padding-bottom:16px}
+.pb{min-width:30px;height:30px;border:1px solid var(--bd);border-radius:7px;background:var(--bg2);font-size:11px;cursor:pointer;padding:0 8px;color:var(--tx2)}
+.pb:hover{border-color:var(--green);color:var(--green)}
+.pb.on{background:var(--green);color:#fff;border-color:var(--green);font-weight:700}
+.pb:disabled{opacity:.3;cursor:default}
+
+/* ── detail page ── */
+.detbar{background:var(--bg2);border-bottom:1px solid var(--bd);padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:10}
+.backbtn{display:flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--bd);border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer;color:var(--tx2)}
+.backbtn:hover{border-color:var(--green);color:var(--green)}
+.detbody{max-width:620px;margin:0 auto;padding:16px 16px 40px}
+.dcard{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:12px}
+.dhero{padding:18px;border-bottom:1px solid var(--bd)}
+.dirow{display:flex;gap:12px;align-items:flex-start;margin-bottom:12px}
+.dico{width:52px;height:52px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:26px;flex-shrink:0}
+.dtit{font-size:16px;font-weight:700;color:var(--tx);line-height:1.35;margin-bottom:7px}
+.dbadges{display:flex;gap:6px;flex-wrap:wrap}
+.dtable{width:100%;border-collapse:collapse}
+.dtable tr{border-bottom:1px solid var(--bd)}.dtable tr:last-child{border-bottom:none}
+.dtable td{padding:10px 14px;font-size:12px;vertical-align:top}
+.dtable td:first-child{width:38%;color:var(--tx3);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.dtable td:last-child{color:var(--tx);font-weight:500}
+.dtable td.green{color:var(--green);font-size:14px;font-weight:700}
+.ddesc{padding:16px;border-bottom:1px solid var(--bd)}
+.ddesc-h{font-size:10px;color:var(--tx3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}
+.ddesc p{font-size:12px;color:var(--tx2);line-height:1.75}
+.ccard{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:12px}
+.cchead{background:var(--greenl);padding:12px 16px}
+.cchead span{font-size:13px;font-weight:700;color:#9FE1CB}
+.ccbody{padding:4px 16px 12px}
+.crow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd)}.crow:last-child{border-bottom:none}
+.crowi{width:34px;height:34px;border-radius:9px;background:var(--bg3);border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.crowl{font-size:10px;color:var(--tx3);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em}
+.crowv{font-size:13px;font-weight:700;color:var(--tx)}
+.cbtns{padding:0 16px 16px;display:flex;gap:8px}
+.cbtn{flex:1;border:none;border-radius:9px;padding:10px;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px}
+.cbtn-call{background:var(--green);color:#fff}.cbtn-wa{background:#25D366;color:#fff}
+
+/* ── post form ── */
+.fbar{background:var(--bg2);border-bottom:1px solid var(--bd);padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:10}
+.fbody{max-width:560px;margin:0 auto;padding:16px 16px 40px}
+.ftitle{font-size:16px;font-weight:700;color:var(--tx);margin-bottom:14px}
+.fcard{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;padding:20px}
+.frow{margin-bottom:11px}
+.flab{font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600}
+.flab b{color:var(--red)}
+.fin{width:100%;border:1px solid var(--bd);border-radius:8px;padding:9px 10px;font-size:12px;outline:none;color:var(--tx);background:var(--bg3)}
+.fin:focus{border-color:var(--green)}.fin::placeholder{color:var(--tx3)}
+.fg2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.errt{font-size:10px;color:var(--red);margin-top:2px;display:none}
+.subbtn{width:100%;background:var(--green);color:#fff;border:none;border-radius:9px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;margin-top:6px}
+.subbtn:hover{background:#17886a}
+.okbox{text-align:center;padding:36px 16px;display:none}
+.okbox .oke{font-size:48px;margin-bottom:12px}
+.okbox h3{font-size:16px;font-weight:700;color:var(--tx);margin-bottom:5px}
+.okbox p{font-size:12px;color:var(--tx2);margin-bottom:16px}
+.viewbtn{background:var(--green);color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:12px;font-weight:700;cursor:pointer}
+</style>
+</head>
+<body>
+
+<!-- ── LIST PAGE ─────────────────────────────────────────────────────── -->
+<div class="page on" id="pg-list">
+  <div class="bar">
+    <div class="logo">Classifieds<b>Desk</b> <small>Deccan Chronicle</small></div>
+    <div class="sw">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx3)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" id="srch" placeholder="Search ads…" oninput="onSearch(this.value)"/>
+    </div>
+    <div class="live"><div class="ldot" id="ldot"></div><span id="live-label">Loading…</span></div>
+    <button class="postbtn" onclick="goPage('pg-form')">+ Post ad</button>
+  </div>
+
+  <div class="layout">
+    <!-- sidebar -->
+    <div class="side">
+      <div class="sh">Categories</div>
+      <div class="ci on" id="ci-all" onclick="setCat('',this)"><div class="ci-l">📋 All ads</div><span class="cc" id="cnt-all">–</span></div>
+      <div class="ci" id="ci-Property"    onclick="setCat('Property',this)">   <div class="ci-l">🏠 Property</div>   <span class="cc" id="cnt-Property">–</span></div>
+      <div class="si" id="si-For Sale"    onclick="setSub('Property','For Sale',this)">    For sale    <span id="cnt-For Sale">–</span></div>
+      <div class="si" id="si-For Rent"    onclick="setSub('Property','For Rent',this)">    For rent    <span id="cnt-For Rent">–</span></div>
+      <div class="si" id="si-PG / Hostel" onclick="setSub('Property','PG / Hostel',this)"> PG / hostel <span id="cnt-PG">–</span></div>
+      <div class="ci" id="ci-Matrimonial" onclick="setCat('Matrimonial',this)"><div class="ci-l">💍 Matrimonial</div><span class="cc" id="cnt-Matrimonial">–</span></div>
+      <div class="ci" id="ci-Jobs"        onclick="setCat('Jobs',this)">       <div class="ci-l">💼 Jobs</div>       <span class="cc" id="cnt-Jobs">–</span></div>
+      <div class="ci" id="ci-Automotive"  onclick="setCat('Automotive',this)"> <div class="ci-l">🚗 Automotive</div><span class="cc" id="cnt-Automotive">–</span></div>
+
+      <div class="sep"></div>
+      <div class="sh">Source</div>
+      <div class="ci" id="ci-src-scraper" onclick="setSrc('scraper',this)"><div class="ci-l">🖥 Scraper</div><span class="cc" id="cnt-scraper">–</span></div>
+      <div class="ci" id="ci-src-pdf"     onclick="setSrc('pdf',this)">    <div class="ci-l">📄 PDF import</div><span class="cc" id="cnt-pdf">–</span></div>
+      <div class="ci" id="ci-src-seller"  onclick="setSrc('seller',this)"> <div class="ci-l">👤 Seller</div><span class="cc" id="cnt-seller">–</span></div>
+
+      <div class="sep"></div>
+      <div class="sh">This week's papers</div>
+      <div class="day-section" id="day-pills">
+        <div class="day-loading">Loading days…</div>
+      </div>
+    </div>
+
+    <!-- main grid -->
+    <div class="main">
+      <div class="toolbar">
+        <div class="tinfo" id="tinfo">Loading ads…</div>
+        <button class="scrape-btn" id="scrape-btn" onclick="triggerScrape()">⟳ Scrape today</button>
+        <button class="scrape-btn" onclick="triggerWeekScrape()" style="border-color:var(--bd)">⟳ Scrape full week</button>
+        <select class="sortsel" id="sortsel" onchange="reload()">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="price_asc">Price: low → high</option>
+          <option value="price_desc">Price: high → low</option>
+        </select>
+      </div>
+      <div class="chips" id="chips"></div>
+      <div class="grid" id="grid"></div>
+      <div class="pager" id="pager"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── DETAIL PAGE ─────────────────────────────────────────────────────── -->
+<div class="page" id="pg-detail">
+  <div class="detbar">
+    <button class="backbtn" onclick="goPage('pg-list')">← Back</button>
+    <span style="font-size:12px;color:var(--tx3)" id="det-crumb"></span>
+  </div>
+  <div class="detbody">
+    <div class="dcard">
+      <div class="dhero">
+        <div class="dirow">
+          <div class="dico" id="det-ico"></div>
+          <div style="flex:1"><div class="dtit" id="det-tit"></div><div class="dbadges" id="det-badges"></div></div>
+        </div>
+      </div>
+      <table class="dtable" id="det-table"></table>
+      <div class="ddesc"><div class="ddesc-h">Description</div><p id="det-desc"></p></div>
+    </div>
+    <div class="ccard">
+      <div class="cchead"><span>📞 Contact details</span></div>
+      <div class="ccbody" id="cc-body"></div>
+      <div class="cbtns" id="cc-btns"></div>
+    </div>
+    <div style="text-align:center;padding-bottom:20px">
+      <button class="backbtn" onclick="goPage('pg-list')" style="display:inline-flex">← Back to all ads</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── POST FORM ─────────────────────────────────────────────────────── -->
+<div class="page" id="pg-form">
+  <div class="fbar">
+    <button class="backbtn" onclick="goPage('pg-list')">← Back</button>
+    <span style="font-size:12px;color:var(--tx3)">Post a new classified ad</span>
+  </div>
+  <div class="fbody">
+    <div class="fcard">
+      <div id="frmContent">
+        <div class="ftitle">Post your ad</div>
+        <div class="fg2">
+          <div class="frow">
+            <label class="flab">Category <b>*</b></label>
+            <select class="fin" id="f-cat">
+              <option value="">Select…</option>
+              <option>Property</option><option>Matrimonial</option>
+              <option>Jobs</option><option>Automotive</option>
+            </select>
+            <div class="errt" id="e-cat">Required</div>
+          </div>
+          <div class="frow">
+            <label class="flab">Sub-category</label>
+            <select class="fin" id="f-sub">
+              <option>For Sale</option><option>For Rent</option><option>PG / Hostel</option>
+              <option>Full-time</option><option>Part-time</option><option>Used vehicle</option>
+            </select>
+          </div>
+        </div>
+        <div class="frow">
+          <label class="flab">Ad title <b>*</b></label>
+          <input class="fin" id="f-title" placeholder="e.g. 3 BHK flat, Jubilee Hills"/>
+          <div class="errt" id="e-title">Required</div>
+        </div>
+        <div class="fg2">
+          <div class="frow"><label class="flab">Location</label><input class="fin" id="f-loc" placeholder="Area, City"/></div>
+          <div class="frow"><label class="flab">Price</label><input class="fin" id="f-price" placeholder="₹62 L or ₹25k/mo"/></div>
+        </div>
+        <div class="fg2">
+          <div class="frow"><label class="flab">Size / area</label><input class="fin" id="f-size" placeholder="1200 sq ft"/></div>
+          <div class="frow"><label class="flab">Date</label><input class="fin" id="f-date" type="date"/></div>
+        </div>
+        <div class="fg2">
+          <div class="frow">
+            <label class="flab">Phone <b>*</b></label>
+            <input class="fin" id="f-phone" placeholder="9876543210"/>
+            <div class="errt" id="e-phone">Required</div>
+          </div>
+          <div class="frow"><label class="flab">WhatsApp</label><input class="fin" id="f-wa" placeholder="If different"/></div>
+        </div>
+        <div class="frow"><label class="flab">Email</label><input class="fin" id="f-email" placeholder="seller@example.com"/></div>
+        <div class="frow"><label class="flab">Description</label><textarea class="fin" id="f-desc" rows="3" placeholder="Full ad text…"></textarea></div>
+        <button class="subbtn" onclick="submitAd()">Submit ad</button>
+      </div>
+      <div class="okbox" id="okBox">
+        <div class="oke">✅</div>
+        <h3>Ad submitted!</h3>
+        <p id="ok-msg"></p>
+        <button class="viewbtn" onclick="goPage('pg-list')">View all ads</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────────
+const API = 'http://localhost:3001'; // your server.js
+const PER = 24;
+
+// ── State ──────────────────────────────────────────────────────────────────
+let state = {
+  cat: '', sub: '', src: '', day: '', date: '', q: '',
+  sort: 'newest', page: 1
+};
+let scraping = false;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function esc(s){ var d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+function fmt(d){ if(!d)return'—'; return new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); }
+function icoFor(cat,sub){
+  var c=(cat||'').toLowerCase(), s=(sub||'').toLowerCase();
+  if(c==='matrimonial') return {cl:'im',e:'💍'};
+  if(c==='jobs')        return {cl:'ij',e:'💼'};
+  if(c==='automotive')  return {cl:'ia',e:'🚗'};
+  if(s.includes('rent'))                       return {cl:'ip',e:'🏢'};
+  if(s.includes('pg')||s.includes('hostel'))   return {cl:'ip',e:'🛏'};
+  if(c==='property')    return {cl:'ip',e:'🏠'};
+  return {cl:'io',e:'📋'};
+}
+function bdg(s){
+  if(s==='scraper') return '<span class="badge bs">scraper</span>';
+  if(s==='pdf')     return '<span class="badge bp">pdf</span>';
+  return '<span class="badge bsl">seller</span>';
+}
+
+// ── API calls ──────────────────────────────────────────────────────────────
+async function apiFetch(path){
+  const r = await fetch(API+path);
+  if(!r.ok) throw new Error('API '+r.status);
+  return r.json();
+}
+
+function buildQuery(){
+  const p = new URLSearchParams();
+  if(state.cat)  p.set('category',    state.cat);
+  if(state.sub)  p.set('subCategory', state.sub);
+  if(state.src)  p.set('source',      state.src);
+  if(state.day)  p.set('day',         state.day);
+  if(state.date) p.set('date',        state.date);
+  if(state.q)    p.set('search',      state.q);
+  p.set('sort',  state.sort);
+  p.set('page',  state.page);
+  p.set('limit', PER);
+  return p.toString();
+}
+
+// ── Load & render ads ──────────────────────────────────────────────────────
+async function reload(){
+  state.sort = document.getElementById('sortsel').value;
+  renderChips();
+  renderSkeleton();
+  try {
+    const res = await apiFetch('/ads?'+buildQuery());
+    renderGrid(res);
+    renderPager(res);
+    document.getElementById('tinfo').innerHTML =
+      'Showing <b>'+(res.total?((state.page-1)*PER+1):0)+'–'+Math.min(state.page*PER,res.total)+'</b> of <b>'+res.total+'</b> ads'+
+      (state.day  ? ' · <b>'+state.day+'</b>' : '')+
+      (state.date ? ' · <b>'+fmt(state.date)+'</b>' : '');
+  } catch(e){
+    document.getElementById('grid').innerHTML =
+      '<div class="empty"><h3>Could not load ads</h3><p>Make sure <code>node server.js</code> is running on port 3001.</p>'+
+      '<p style="font-size:10px;margin-top:6px;color:var(--tx3)">'+esc(e.message)+'</p></div>';
+    document.getElementById('tinfo').textContent = 'Error loading ads';
+  }
+}
+
+function renderSkeleton(){
+  var h='';
+  for(var i=0;i<6;i++) h+='<div class="skel"><div class="skel-line wide"></div><div class="skel-line med"></div><div class="skel-line short"></div></div>';
+  document.getElementById('grid').innerHTML=h;
+  document.getElementById('pager').innerHTML='';
+}
+
+function renderGrid(res){
+  if(!res.data||!res.data.length){
+    var msg = state.day
+      ? 'No ads found for <b>'+state.day+'</b>. The scraper may not have run yet for this day.'
+      : 'No ads match your filters.';
+    document.getElementById('grid').innerHTML=
+      '<div class="empty"><h3>No ads found</h3><p>'+msg+'</p>'+
+      (state.day?'<button class="empty-btn" onclick="triggerScrape()">Scrape now</button>':'')+'</div>';
+    return;
+  }
+  var h='';
+  res.data.forEach(function(a){
+    var ic=icoFor(a.category,a.sub_category);
+    h+='<div class="card" onclick="openDet('+a.sno+')">';
+    h+='<div class="card-top"><div class="cico '+ic.cl+'">'+ic.e+'</div>';
+    h+='<div class="cinfo"><div class="csno">#'+a.sno+' · '+esc(a.day_published)+', '+fmt(a.date_published)+'</div>';
+    h+='<div class="ctit">'+esc(a.title||'Untitled')+'</div>';
+    h+='<div class="cloc">📍 '+esc(a.location||'—')+'</div>';
+    h+='<div class="cprice">'+esc(a.price||'—')+'</div></div></div>';
+    h+='<div class="cmeta"><span class="mpill">'+esc(a.sub_category||a.category)+'</span></div>';
+    h+='<div class="cfoot">'+bdg(a.source)+'<span class="cdate">'+esc(a.day_published)+'</span></div></div>';
+  });
+  document.getElementById('grid').innerHTML=h;
+  // store for detail lookup
+  window._ads = res.data;
+  window._adsOffset = (state.page-1)*PER;
+}
+
+function renderPager(res){
+  if(res.totalPages<=1){document.getElementById('pager').innerHTML='';return;}
+  var h='<button class="pb"'+(state.page===1?' disabled':'')+' onclick="goPg('+(state.page-1)+')">← Prev</button>';
+  for(var i=1;i<=res.totalPages;i++) h+='<button class="pb'+(i===state.page?' on':'')+'" onclick="goPg('+i+')">'+i+'</button>';
+  h+='<button class="pb"'+(state.page===res.totalPages?' disabled':'')+' onclick="goPg('+(state.page+1)+')">Next →</button>';
+  document.getElementById('pager').innerHTML=h;
+}
+
+function goPg(p){ state.page=p; reload(); window.scrollTo(0,0); }
+
+// ── Active filter chips ────────────────────────────────────────────────────
+function renderChips(){
+  var h='';
+  if(state.cat)  h+='<div class="chip" onclick="setCat(\'\',null)">📋 '+esc(state.cat)+' ×</div>';
+  if(state.sub)  h+='<div class="chip" onclick="setSub(\'\',\'\',null)">'+esc(state.sub)+' ×</div>';
+  if(state.src)  h+='<div class="chip" onclick="setSrc(\'\',null)">'+esc(state.src)+' ×</div>';
+  if(state.day)  h+='<div class="chip" onclick="setDay(\'\',null)">📅 '+esc(state.day)+' ×</div>';
+  if(state.date) h+='<div class="chip" onclick="setDate(\'\',null)">📅 '+fmt(state.date)+' ×</div>';
+  if(state.q)    h+='<div class="chip" onclick="clearSearch()">🔍 '+esc(state.q)+' ×</div>';
+  document.getElementById('chips').innerHTML=h;
+}
+
+// ── Sidebar filter setters ─────────────────────────────────────────────────
+function _clearSidebar(){
+  document.querySelectorAll('.ci,.si').forEach(function(e){e.classList.remove('on');});
+}
+function setCat(c,el){
+  state.cat=c; state.sub=''; state.src=''; state.page=1;
+  _clearSidebar();
+  if(el) el.classList.add('on');
+  else   document.getElementById('ci-all').classList.add('on');
+  reload();
+}
+function setSub(c,s,el){
+  state.cat=c; state.sub=s; state.src=''; state.page=1;
+  _clearSidebar();
+  if(el) el.classList.add('on');
+  reload();
+}
+function setSrc(s,el){
+  state.src=s; state.cat=''; state.sub=''; state.page=1;
+  _clearSidebar();
+  if(el) el.classList.add('on');
+  reload();
+}
+function setDay(d,el){
+  state.day=d; state.date=''; state.page=1;
+  document.querySelectorAll('.dpill').forEach(function(e){e.classList.remove('on');});
+  if(el) el.classList.add('on');
+  reload();
+}
+function setDate(d,el){
+  state.date=d; state.day=''; state.page=1;
+  document.querySelectorAll('.dpill').forEach(function(e){e.classList.remove('on');});
+  if(el) el.classList.add('on');
+  reload();
+}
+
+var searchTimer=null;
+function onSearch(q){ clearTimeout(searchTimer); searchTimer=setTimeout(function(){state.q=q;state.page=1;reload();},400); }
+function clearSearch(){ document.getElementById('srch').value=''; state.q=''; state.page=1; reload(); }
+
+// ── Load day pills from /days ──────────────────────────────────────────────
+async function loadDays(){
+  var el=document.getElementById('day-pills');
+  try{
+    var rows = await apiFetch('/days');
+    var h='';
+    // "All" pill
+    h+='<div class="dpill dpill-all on" id="dpill-all" onclick="setDay(\'\',this)">📋 All days</div>';
+    if(!rows.length){
+      h+='<div style="font-size:11px;color:var(--tx3);padding:4px 0">No data yet.<br>Click "Scrape full week" to start.</div>';
+    } else {
+      rows.forEach(function(r){
+        var dayKey = r.day_name; // e.g. "Sunday"
+        var label  = r.label;   // e.g. "Wed, 24 Jun"
+        var count  = r.ad_count;
+        h+='<div class="dpill" id="dpill-'+dayKey+'" onclick="setDate(\''+r.date_published+'\',this)" title="Click to view '+dayKey+'\'s ads">';
+        h+='<div class="dpill-left"><span class="dpill-day">'+dayKey+'</span><span class="dpill-date">'+label+'</span></div>';
+        h+='<span class="dpill-count">'+count+'</span></div>';
+      });
+    }
+    el.innerHTML=h;
+  } catch(e){
+    el.innerHTML='<div style="font-size:11px;color:var(--tx3)">Server offline</div>';
+  }
+}
+
+// ── Load stats for sidebar counts ──────────────────────────────────────────
+async function loadStats(){
+  try{
+    var s = await apiFetch('/stats');
+    var set = function(id,v){ var el=document.getElementById(id); if(el) el.textContent=v||0; };
+    set('cnt-all',       s.total);
+    set('cnt-Property',  s.property);
+    set('cnt-Matrimonial',s.matrimonial);
+    set('cnt-Jobs',      s.jobs);
+    set('cnt-Automotive',s.automotive);
+    set('cnt-scraper',   s.from_scraper);
+    set('cnt-pdf',       s.from_pdf);
+    set('cnt-seller',    s.from_seller);
+    document.getElementById('live-label').textContent =
+      'Live · '+s.today+' today';
+  } catch(e){
+    document.getElementById('live-label').textContent = 'Server offline';
+    document.getElementById('ldot').style.background='var(--red)';
+  }
+}
+
+// ── On-demand scrape ──────────────────────────────────────────────────────
+async function triggerScrape(){
+  if(scraping) return;
+  scraping=true;
+  var btn=document.getElementById('scrape-btn');
+  btn.textContent='⟳ Scraping…'; btn.classList.add('loading');
+  document.getElementById('ldot').classList.add('scraping');
+  document.getElementById('live-label').textContent='Scraping DC e-paper…';
+  try{
+    var date = state.date || new Date().toISOString().slice(0,10);
+    await apiFetch('/scrape?date='+date);
+    // Poll for completion (scrape runs async; wait a bit then reload)
+    setTimeout(function(){
+      loadStats(); loadDays(); reload();
+      btn.textContent='⟳ Scrape today'; btn.classList.remove('loading');
+      document.getElementById('ldot').classList.remove('scraping');
+      scraping=false;
+    }, 8000);
+  } catch(e){
+    btn.textContent='⟳ Scrape today'; btn.classList.remove('loading');
+    scraping=false;
+    alert('Scrape failed: '+e.message+'\n\nMake sure server.js is running.');
+  }
+}
+
+async function triggerWeekScrape(){
+  if(scraping) return;
+  if(!confirm('This will scrape all 7 days of this week from DC e-paper. OCR takes ~2-5 min per day.\n\nContinue?')) return;
+  scraping=true;
+  document.getElementById('ldot').classList.add('scraping');
+  document.getElementById('live-label').textContent='Scraping full week…';
+  try{
+    await apiFetch('/scrape/week');
+    // Week scrape takes longer — poll after 60 seconds
+    setTimeout(function(){
+      loadStats(); loadDays(); reload();
+      document.getElementById('ldot').classList.remove('scraping');
+      scraping=false;
+    }, 60000);
+    alert('Week scrape started! It runs in the background and takes 10–30 minutes.\nThe sidebar will update when complete.');
+  } catch(e){
+    alert('Failed: '+e.message);
+    scraping=false;
+  }
+}
+
+// ── Detail view ───────────────────────────────────────────────────────────
+async function openDet(sno){
+  // Try in-memory first (already loaded)
+  var a = window._ads && window._ads.find(function(x){ return x.sno===sno; });
+
+  // Fallback: fetch by page offset id
+  if(!a){
+    try{
+      var res = await apiFetch('/ads?'+buildQuery()+'&page='+state.page+'&limit='+PER);
+      a = res.data && res.data.find(function(x){ return x.sno===sno; });
+    } catch(_) {}
+  }
+
+  if(!a){ alert('Could not load ad details'); return; }
+
+  goPage('pg-detail');
+  var ic = icoFor(a.category, a.sub_category);
+  document.getElementById('det-crumb').textContent = (a.category||'') + ' › ' + (a.sub_category||'');
+  document.getElementById('det-tit').textContent   = a.title || 'Untitled';
+  var dico = document.getElementById('det-ico');
+  dico.textContent = ic.e; dico.className = 'dico '+ic.cl;
+  document.getElementById('det-badges').innerHTML =
+    bdg(a.source)+
+    '<span class="badge" style="background:var(--bg3);color:var(--tx2);border:1px solid var(--bd)">'+esc(a.day_published)+'</span>'+
+    '<span class="badge" style="background:var(--bg3);color:var(--tx2);border:1px solid var(--bd)">#'+a.sno+'</span>';
+
+  var rows = [
+    ['S.No',       '#'+a.sno],
+    ['Date',       fmt(a.date_published)],
+    ['Day',        a.day_published],
+    ['Category',   a.category],
+    ['Sub-category',a.sub_category],
+    ['Location',   a.location||'—'],
+    ['Price',      a.price||'—', true],
+    ['Size / area',a.size_area||'—'],
+    ['Source',     a.source],
+  ];
+  document.getElementById('det-table').innerHTML = rows.map(function(r){
+    return '<tr><td>'+r[0]+'</td><td class="'+(r[2]?'green':'')+'">'+esc(String(r[1]))+'</td></tr>';
+  }).join('');
+  document.getElementById('det-desc').textContent = a.description || 'No description provided.';
+
+  // Contact panel
+  var cc='', cb='';
+  if(a.phone){
+    cc += '<div class="crow"><div class="crowi">📱</div><div><div class="crowl">Phone</div><div class="crowv">'+esc(a.phone)+'</div></div></div>';
+    cb += '<a href="tel:'+esc(a.phone)+'" class="cbtn cbtn-call" style="text-decoration:none">📞 Call</a>';
+    cb += '<a href="https://wa.me/91'+esc(a.phone.replace(/\D/g,'').slice(-10))+'" target="_blank" class="cbtn cbtn-wa" style="text-decoration:none">💬 WhatsApp</a>';
+  }
+  if(a.whatsapp && a.whatsapp!==a.phone){
+    cc += '<div class="crow"><div class="crowi">💬</div><div><div class="crowl">WhatsApp</div><div class="crowv">'+esc(a.whatsapp)+'</div></div></div>';
+  }
+  if(a.email){
+    cc += '<div class="crow"><div class="crowi">✉️</div><div><div class="crowl">Email</div><div class="crowv">'+esc(a.email)+'</div></div></div>';
+    cb += '<a href="mailto:'+esc(a.email)+'" class="cbtn" style="background:var(--bg3);color:var(--tx);border:1px solid var(--bd);text-decoration:none">✉ Email</a>';
+  }
+  if(!cc) cc='<div style="padding:14px;font-size:12px;color:var(--tx3)">No contact info available</div>';
+  document.getElementById('cc-body').innerHTML=cc;
+  document.getElementById('cc-btns').innerHTML=cb;
+}
+
+// ── Page navigation ────────────────────────────────────────────────────────
+function goPage(id){
+  document.querySelectorAll('.page').forEach(function(p){p.classList.remove('on');});
+  document.getElementById(id).classList.add('on');
+  if(id==='pg-form'){
+    document.getElementById('frmContent').style.display='block';
+    document.getElementById('okBox').style.display='none';
+    document.getElementById('f-date').value=new Date().toISOString().slice(0,10);
+  }
+  window.scrollTo(0,0);
+}
+
+// ── Post ad form ───────────────────────────────────────────────────────────
+async function submitAd(){
+  var cat   = document.getElementById('f-cat').value;
+  var title = document.getElementById('f-title').value.trim();
+  var phone = document.getElementById('f-phone').value.trim();
+  var ok    = true;
+  ['e-cat','e-title','e-phone'].forEach(function(i){ document.getElementById(i).style.display='none'; });
+  if(!cat)   { document.getElementById('e-cat').style.display='block';   ok=false; }
+  if(!title) { document.getElementById('e-title').style.display='block'; ok=false; }
+  if(!phone) { document.getElementById('e-phone').style.display='block'; ok=false; }
+  if(!ok) return;
+
+  try{
+    var res = await fetch(API+'/ads', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        category:    cat,
+        subCategory: document.getElementById('f-sub').value,
+        title:       title,
+        description: document.getElementById('f-desc').value,
+        location:    document.getElementById('f-loc').value,
+        price:       document.getElementById('f-price').value,
+        sizeArea:    document.getElementById('f-size').value,
+        phone:       phone,
+        whatsapp:    document.getElementById('f-wa').value,
+        email:       document.getElementById('f-email').value,
+      })
+    });
+    var data = await res.json();
+    if(!res.ok) throw new Error(data.error||'Submit failed');
+    document.getElementById('ok-msg').textContent =
+      '"'+title+'" posted under '+cat+'. Ad ID: #'+data.id;
+    document.getElementById('frmContent').style.display='none';
+    document.getElementById('okBox').style.display='block';
+    loadStats();
+  } catch(e){
+    alert('Failed to submit: '+e.message+'\n\nMake sure server.js is running.');
+  }
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+loadStats();
+loadDays();
+reload();
+</script>
+</body>
+</html>

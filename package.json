@@ -1,0 +1,23 @@
+{
+  "name": "classifieds-desk",
+  "version": "2.0.0",
+  "description": "Deccan Chronicle classifieds scraper + viewer",
+  "main": "server.js",
+  "scripts": {
+    "start":       "node server.js",
+    "scrape":      "node dc_scraper.js",
+    "scrape:week": "node dc_scraper.js $(date -d 'last monday' +%Y-%m-%d) $(date +%Y-%m-%d)",
+    "dev":         "nodemon server.js"
+  },
+  "dependencies": {
+    "cors":          "^2.8.5",
+    "dotenv":        "^16.4.5",
+    "express":       "^4.19.2",
+    "multer":        "^1.4.5-lts.1",
+    "mysql2":        "^3.9.7",
+    "node-cron":     "^3.0.3",
+    "pdf-parse":     "^1.1.1",
+    "puppeteer":     "^22.8.2",
+    "tesseract.js":  "^5.1.0"
+  }
+}
