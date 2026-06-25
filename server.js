@@ -400,4 +400,4 @@ function startServer(port) {
   });
 }
 
-initDB().then(() => startServer(Number(process.env.PORT) || 8080));
+initDB().then(() => startServer(Number(process.env.PORT) || 3001));
