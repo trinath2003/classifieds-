@@ -390,6 +390,7 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────
+// ── Start ──────────────────────────────────────────────────────────────────
 function startServer(port) {
   const server = app.listen(port, () =>
     console.log(`✅  ClassifiedsDesk → http://localhost:${port}`)
@@ -400,4 +401,6 @@ function startServer(port) {
   });
 }
 
-initDB().then(() => startServer(Number(process.env.PORT) || 3001));
+initDB()
+  .catch(e => console.error('[DB] Fatal init error:', e.code, e.message, e))
+  .finally(() => startServer(Number(process.env.PORT) || 8080));
