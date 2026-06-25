@@ -403,4 +403,4 @@ function startServer(port) {
 
 initDB()
   .catch(e => console.error('[DB] Fatal init error:', e.code, e.message, e))
-  .finally(() => startServer(Number(process.env.PORT) || 8080));
+  .finally(() => startServer(Number(process.env.PORT) || 3001));
