@@ -267,21 +267,22 @@ app.get('/ads', async (req, res) => {
     const cond   = ['newspaper_name = ?'];
     const params = ['Deccan Chronicle'];
 
-    if (category)    { cond.push('LOWER(COALESCE(category,     `Category`))     = LOWER(?)'); params.push(category); }
-    if (subCategory) { cond.push('LOWER(COALESCE(sub_category, `Sub-Category`)) = LOWER(?)'); params.push(subCategory); }
+    if (category)    { cond.push('LOWER(category) = LOWER(?)'); params.push(category); }
+    if (subCategory) { cond.push('LOWER(sub_category) = LOWER(?)'); params.push(subCategory); }
     if (source)      { cond.push('source = ?');                                               params.push(source); }
     if (day)         { cond.push('DAYNAME(date_published) = ?');                              params.push(day); }
     if (date)        { cond.push('date_published = ?');                                       params.push(date); }
     if (dateFrom)    { cond.push('date_published >= ?');                                      params.push(dateFrom); }
     if (dateTo)      { cond.push('date_published <= ?');                                      params.push(dateTo); }
 
+
     if (search) {
       const t = `%${search}%`;
       cond.push(`(
-        LOWER(COALESCE(title,       \`Title/Property Type\`)) LIKE LOWER(?) OR
-        LOWER(COALESCE(description, \`Additional Details\`))  LIKE LOWER(?) OR
-        LOWER(COALESCE(location,    \`Location\`))            LIKE LOWER(?) OR
-        LOWER(COALESCE(category,    \`Category\`))            LIKE LOWER(?)
+        LOWER(title)       LIKE LOWER(?) OR
+        LOWER(description) LIKE LOWER(?) OR
+        LOWER(location)    LIKE LOWER(?) OR
+        LOWER(category)    LIKE LOWER(?)
       )`);
       params.push(t, t, t, t);
     }
@@ -290,23 +291,16 @@ app.get('/ads', async (req, res) => {
     const orderMap = {
       newest:     'date_published DESC, scraped_at DESC',
       oldest:     'date_published ASC,  scraped_at ASC',
-      price_asc:  'COALESCE(price, `Price/Details`) ASC',
-      price_desc: 'COALESCE(price, `Price/Details`) DESC',
+      price_asc:  'price ASC',
+      price_desc: 'price DESC',
     };
     const orderBy = orderMap[sort] || 'date_published DESC, scraped_at DESC';
 
     const [[{ total }]] = await db.query(`SELECT COUNT(*) AS total FROM classified_ads ${where}`, params);
     const [rows] = await db.query(`
       SELECT
-        id,
-        COALESCE(category,     \`Category\`)            AS category,
-        COALESCE(sub_category, \`Sub-Category\`)        AS sub_category,
-        COALESCE(title,        \`Title/Property Type\`) AS title,
-        COALESCE(description,  \`Additional Details\`)  AS description,
-        COALESCE(location,     \`Location\`)            AS location,
-        COALESCE(price,        \`Price/Details\`)       AS price,
-        COALESCE(size_area,    \`Size/Area\`)           AS size_area,
-        COALESCE(phone,        \`Contact\`)             AS phone,
+        id, category, sub_category, title, description,
+        location, price, size_area, phone,
         whatsapp, email, source, status,
         date_published, day_published, scraped_at
       FROM classified_ads
@@ -329,15 +323,10 @@ app.get('/ads/:id', async (req, res) => {
     if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: 'Invalid id' });
     const [rows] = await db.query(`
       SELECT
-        COALESCE(category,     \`Category\`)            AS category,
-        COALESCE(sub_category, \`Sub-Category\`)        AS sub_category,
-        COALESCE(title,        \`Title/Property Type\`) AS title,
-        COALESCE(description,  \`Additional Details\`)  AS description,
-        COALESCE(location,     \`Location\`)            AS location,
-        COALESCE(price,        \`Price/Details\`)       AS price,
-        COALESCE(size_area,    \`Size/Area\`)           AS size_area,
-        COALESCE(phone,        \`Contact\`)             AS phone,
-        whatsapp, email, source, status, date_published, day_published, scraped_at
+        category, sub_category, title, description,
+        location, price, size_area, phone,
+        whatsapp, email, source, status,
+        date_published, day_published, scraped_at
       FROM classified_ads
       WHERE id = ? AND newspaper_name = 'Deccan Chronicle'
     `, [id]);
