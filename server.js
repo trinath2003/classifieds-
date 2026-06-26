@@ -16,19 +16,20 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 // ── DB pool ────────────────────────────────────────────────────────────────
-// Use MYSQL_URL (Railway provides this automatically) or fall back to individual vars
-const dbConfig = process.env.MYSQL_URL ? process.env.MYSQL_URL : {
-  host:               process.env.DB_HOST     || 'localhost',
-  port:               Number(process.env.DB_PORT) || 3306,
-  user:               process.env.DB_USER     || 'root',
-  password:           process.env.DB_PASSWORD || '',
-  database:           process.env.DB_NAME     || 'newspaper_db',
-};
-const db = mysql.createPool(
-  typeof dbConfig === 'string'
-    ? { uri: dbConfig, waitForConnections: true, connectionLimit: 10 }
-    : { ...dbConfig, waitForConnections: true, connectionLimit: 10 }
-);
+// FIX 1: mysql2 does NOT accept { uri: '...' } — pass the URL string directly
+// to createPool(), or use a plain config object. Both branches now do this correctly.
+const db = process.env.MYSQL_URL
+  ? mysql.createPool(process.env.MYSQL_URL)          // string → mysql2 parses it
+  : mysql.createPool({
+      host:               process.env.DB_HOST     || 'localhost',
+      port:               Number(process.env.DB_PORT) || 3306,
+      user:               process.env.DB_USER     || 'root',
+      password:           process.env.DB_PASSWORD || '',
+      database:           process.env.DB_NAME     || 'newspaper_db',
+      waitForConnections: true,
+      connectionLimit:    10,
+      connectTimeout:     20000,
+    });
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -101,93 +102,113 @@ function normalizeAd(row, sno) {
 }
 
 // ── DB init ────────────────────────────────────────────────────────────────
-async function initDB() {
-  try {
-    // Step 1: create database if it doesn't exist
-    const bootstrapCfg = process.env.MYSQL_URL
-      ? { uri: process.env.MYSQL_URL, connectTimeout: 10000 }
-      : {
-          host:           process.env.DB_HOST     || 'localhost',
-          port:           Number(process.env.DB_PORT) || 3306,
-          user:           process.env.DB_USER     || 'root',
-          password:       process.env.DB_PASSWORD || '',
-          connectTimeout: 10000,
-        };
+// FIX 2: Retry with exponential backoff — Railway (and Docker) start the app
+// and DB container simultaneously, so the first connection attempt often fires
+// before the DB is accepting connections.
+async function initDB(retries = 6, delayMs = 3000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await _initDBOnce();
+      console.log('[DB] ✅ Schema ready');
+      return;
+    } catch (err) {
+      console.error(`[DB] initDB attempt ${attempt}/${retries} failed: ${err.code} — ${err.message}`);
+      if (attempt < retries) {
+        console.log(`[DB] Retrying in ${delayMs / 1000}s…`);
+        await new Promise(r => setTimeout(r, delayMs));
+        delayMs = Math.min(delayMs * 2, 30000); // exponential backoff, cap at 30s
+      } else {
+        console.error('[DB] All retries exhausted. Server will start without a DB connection.');
+      }
+    }
+  }
+}
+
+async function _initDBOnce() {
+  // FIX 3: When using MYSQL_URL (Railway / PlanetScale / hosted MySQL), the database
+  // already exists — we must NOT try to CREATE DATABASE using that same URL because
+  // (a) hosted providers forbid it and (b) the URL already points at the DB.
+  // Only run the CREATE DATABASE bootstrap when using individual env vars (local dev).
+  if (!process.env.MYSQL_URL) {
+    const bootstrapCfg = {
+      host:           process.env.DB_HOST     || 'localhost',
+      port:           Number(process.env.DB_PORT) || 3306,
+      user:           process.env.DB_USER     || 'root',
+      password:       process.env.DB_PASSWORD || '',
+      connectTimeout: 20000,
+    };
     const bootstrap = await mysql.createConnection(bootstrapCfg);
     const dbName = process.env.DB_NAME || 'newspaper_db';
     await bootstrap.query(
       `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
     );
     await bootstrap.end();
-
-    // Step 2: create table if it doesn't exist
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS classified_ads (
-        id              INT AUTO_INCREMENT PRIMARY KEY,
-        newspaper_name  VARCHAR(100)  DEFAULT NULL,
-        source          ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper',
-        status          ENUM('active','pending','rejected') NOT NULL DEFAULT 'active',
-        date_published  DATE          DEFAULT NULL,
-        day_published   VARCHAR(15)   DEFAULT NULL,
-        category        VARCHAR(60)   DEFAULT NULL,
-        sub_category    VARCHAR(60)   DEFAULT NULL,
-        title           TEXT          DEFAULT NULL,
-        description     TEXT          DEFAULT NULL,
-        location        VARCHAR(255)  DEFAULT NULL,
-        price           VARCHAR(100)  DEFAULT NULL,
-        size_area       VARCHAR(100)  DEFAULT NULL,
-        phone           VARCHAR(60)   DEFAULT NULL,
-        whatsapp        VARCHAR(60)   DEFAULT NULL,
-        email           VARCHAR(120)  DEFAULT NULL,
-        scraped_at      DATETIME      DEFAULT NULL,
-        \`Category\`             VARCHAR(100) DEFAULT NULL,
-        \`Sub-Category\`         VARCHAR(100) DEFAULT NULL,
-        \`Title/Property Type\`  TEXT         DEFAULT NULL,
-        \`Additional Details\`   TEXT         DEFAULT NULL,
-        \`Location\`             VARCHAR(255) DEFAULT NULL,
-        \`Price/Details\`        VARCHAR(100) DEFAULT NULL,
-        \`Size/Area\`            VARCHAR(100) DEFAULT NULL,
-        \`Contact\`              VARCHAR(60)  DEFAULT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-
-    // Step 3: add any missing columns
-    await db.query(`
-      ALTER TABLE classified_ads
-        ADD COLUMN IF NOT EXISTS \`newspaper_name\` VARCHAR(100)  DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`source\`         ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper',
-        ADD COLUMN IF NOT EXISTS \`status\`         ENUM('active','pending','rejected') NOT NULL DEFAULT 'active',
-        ADD COLUMN IF NOT EXISTS \`date_published\` DATE          DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`day_published\`  VARCHAR(15)   DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`category\`       VARCHAR(60)   DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`sub_category\`   VARCHAR(60)   DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`title\`          TEXT          DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`description\`    TEXT          DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`location\`       VARCHAR(255)  DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`price\`          VARCHAR(100)  DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`size_area\`      VARCHAR(100)  DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`phone\`          VARCHAR(60)   DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`whatsapp\`       VARCHAR(60)   DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`email\`          VARCHAR(120)  DEFAULT NULL,
-        ADD COLUMN IF NOT EXISTS \`scraped_at\`     DATETIME      DEFAULT NULL
-    `);
-
-    try {
-      await db.query(`CREATE INDEX IF NOT EXISTS idx_newspaper_date ON classified_ads (newspaper_name, date_published)`);
-      await db.query(`CREATE INDEX IF NOT EXISTS idx_day_published  ON classified_ads (day_published)`);
-    } catch (_) {}
-
-    await db.query(`UPDATE classified_ads SET newspaper_name = 'Deccan Chronicle' WHERE newspaper_name IS NULL`);
-    await db.query(`
-      UPDATE classified_ads
-      SET date_published = DATE(scraped_at), day_published = DAYNAME(scraped_at)
-      WHERE date_published IS NULL AND scraped_at IS NOT NULL
-    `);
-
-    console.log('[DB] ✅ Schema ready');
-  } catch (err) {
-    console.error('[DB] initDB error:', err.code, err.message, err);
   }
+
+  // Step 2: create table if it doesn't exist
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS classified_ads (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      newspaper_name  VARCHAR(100)  DEFAULT NULL,
+      source          ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper',
+      status          ENUM('active','pending','rejected') NOT NULL DEFAULT 'active',
+      date_published  DATE          DEFAULT NULL,
+      day_published   VARCHAR(15)   DEFAULT NULL,
+      category        VARCHAR(60)   DEFAULT NULL,
+      sub_category    VARCHAR(60)   DEFAULT NULL,
+      title           TEXT          DEFAULT NULL,
+      description     TEXT          DEFAULT NULL,
+      location        VARCHAR(255)  DEFAULT NULL,
+      price           VARCHAR(100)  DEFAULT NULL,
+      size_area       VARCHAR(100)  DEFAULT NULL,
+      phone           VARCHAR(60)   DEFAULT NULL,
+      whatsapp        VARCHAR(60)   DEFAULT NULL,
+      email           VARCHAR(120)  DEFAULT NULL,
+      scraped_at      DATETIME      DEFAULT NULL,
+      \`Category\`             VARCHAR(100) DEFAULT NULL,
+      \`Sub-Category\`         VARCHAR(100) DEFAULT NULL,
+      \`Title/Property Type\`  TEXT         DEFAULT NULL,
+      \`Additional Details\`   TEXT         DEFAULT NULL,
+      \`Location\`             VARCHAR(255) DEFAULT NULL,
+      \`Price/Details\`        VARCHAR(100) DEFAULT NULL,
+      \`Size/Area\`            VARCHAR(100) DEFAULT NULL,
+      \`Contact\`              VARCHAR(60)  DEFAULT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Step 3: add any missing columns (ALTER TABLE is idempotent via IF NOT EXISTS)
+  await db.query(`
+    ALTER TABLE classified_ads
+      ADD COLUMN IF NOT EXISTS \`newspaper_name\` VARCHAR(100)  DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`source\`         ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper',
+      ADD COLUMN IF NOT EXISTS \`status\`         ENUM('active','pending','rejected') NOT NULL DEFAULT 'active',
+      ADD COLUMN IF NOT EXISTS \`date_published\` DATE          DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`day_published\`  VARCHAR(15)   DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`category\`       VARCHAR(60)   DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`sub_category\`   VARCHAR(60)   DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`title\`          TEXT          DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`description\`    TEXT          DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`location\`       VARCHAR(255)  DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`price\`          VARCHAR(100)  DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`size_area\`      VARCHAR(100)  DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`phone\`          VARCHAR(60)   DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`whatsapp\`       VARCHAR(60)   DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`email\`          VARCHAR(120)  DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS \`scraped_at\`     DATETIME      DEFAULT NULL
+  `);
+
+  // Indexes — silently ignore duplicate-key errors
+  try {
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_newspaper_date ON classified_ads (newspaper_name, date_published)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_day_published  ON classified_ads (day_published)`);
+  } catch (_) {}
+
+  await db.query(`UPDATE classified_ads SET newspaper_name = 'Deccan Chronicle' WHERE newspaper_name IS NULL`);
+  await db.query(`
+    UPDATE classified_ads
+    SET date_published = DATE(scraped_at), day_published = DAYNAME(scraped_at)
+    WHERE date_published IS NULL AND scraped_at IS NOT NULL
+  `);
 }
 
 // ── Cron jobs ──────────────────────────────────────────────────────────────
@@ -423,7 +444,8 @@ function startServer(port) {
   });
 }
 
-initDB()
-  .catch(e => console.error('[DB] Fatal init error:', e.code, e.message, e))
-  .finally(() => startServer(Number(process.env.PORT) || 8080));
-
+// Start server immediately so Railway's health-check doesn't time out,
+// then run DB init (with retries) in the background.
+startServer(Number(process.env.PORT) || 8080);
+initDB().catch(e => console.error('[DB] Fatal after all retries:', e.code, e.message));
+    
