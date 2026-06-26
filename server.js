@@ -1,15 +1,4 @@
 // server.js — ClassifiedsDesk backend
-// ─────────────────────────────────────────────────────────────────────────────
-// CHANGES in this version:
-//   • Replaced scraper.js import with dc_scraper.js (Puppeteer + OCR)
-//   • Cron: 6 AM daily scrapes today; Sunday midnight kicks off full week backfill
-//   • GET /days returns each of the last 7 actual calendar dates with ad counts
-//   • GET /ads?day=Sunday returns ads for ALL Sundays in the last 7 days' data
-//   • GET /ads?date=2026-06-22 returns ads for that exact date
-//   • GET /scrape?date=2026-06-22 triggers on-demand scrape for any date
-//   • GET /scrape/week triggers scrape for current Mon–Sun week
-// ─────────────────────────────────────────────────────────────────────────────
-
 require('dotenv').config();
 const path    = require('path');
 const express = require('express');
@@ -28,12 +17,13 @@ app.use(express.static(path.join(__dirname)));
 
 // ── DB pool ────────────────────────────────────────────────────────────────
 const db = mysql.createPool({
-  host:             process.env.DB_HOST     || 'localhost',
-  user:             process.env.DB_USER     || 'root',
-  password:         process.env.DB_PASSWORD || '',
-  database:         process.env.DB_NAME     || 'newspaper_db',
+  host:               process.env.DB_HOST     || 'localhost',
+  port:               Number(process.env.DB_PORT) || 3306,
+  user:               process.env.DB_USER     || 'root',
+  password:           process.env.DB_PASSWORD || '',
+  database:           process.env.DB_NAME     || 'newspaper_db',
   waitForConnections: true,
-  connectionLimit:  10
+  connectionLimit:    10
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -109,6 +99,51 @@ function normalizeAd(row, sno) {
 // ── DB init ────────────────────────────────────────────────────────────────
 async function initDB() {
   try {
+    // Step 1: create database if it doesn't exist
+    const bootstrap = await mysql.createConnection({
+      host:           process.env.DB_HOST     || 'localhost',
+      port:           Number(process.env.DB_PORT) || 3306,
+      user:           process.env.DB_USER     || 'root',
+      password:       process.env.DB_PASSWORD || '',
+      connectTimeout: 10000,
+    });
+    await bootstrap.query(
+      `CREATE DATABASE IF NOT EXISTS \`${process.env.DB_NAME || 'newspaper_db'}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+    );
+    await bootstrap.end();
+
+    // Step 2: create table if it doesn't exist
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS classified_ads (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        newspaper_name  VARCHAR(100)  DEFAULT NULL,
+        source          ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper',
+        status          ENUM('active','pending','rejected') NOT NULL DEFAULT 'active',
+        date_published  DATE          DEFAULT NULL,
+        day_published   VARCHAR(15)   DEFAULT NULL,
+        category        VARCHAR(60)   DEFAULT NULL,
+        sub_category    VARCHAR(60)   DEFAULT NULL,
+        title           TEXT          DEFAULT NULL,
+        description     TEXT          DEFAULT NULL,
+        location        VARCHAR(255)  DEFAULT NULL,
+        price           VARCHAR(100)  DEFAULT NULL,
+        size_area       VARCHAR(100)  DEFAULT NULL,
+        phone           VARCHAR(60)   DEFAULT NULL,
+        whatsapp        VARCHAR(60)   DEFAULT NULL,
+        email           VARCHAR(120)  DEFAULT NULL,
+        scraped_at      DATETIME      DEFAULT NULL,
+        \`Category\`             VARCHAR(100) DEFAULT NULL,
+        \`Sub-Category\`         VARCHAR(100) DEFAULT NULL,
+        \`Title/Property Type\`  TEXT         DEFAULT NULL,
+        \`Additional Details\`   TEXT         DEFAULT NULL,
+        \`Location\`             VARCHAR(255) DEFAULT NULL,
+        \`Price/Details\`        VARCHAR(100) DEFAULT NULL,
+        \`Size/Area\`            VARCHAR(100) DEFAULT NULL,
+        \`Contact\`              VARCHAR(60)  DEFAULT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // Step 3: add any missing columns
     await db.query(`
       ALTER TABLE classified_ads
         ADD COLUMN IF NOT EXISTS \`newspaper_name\` VARCHAR(100)  DEFAULT NULL,
@@ -134,9 +169,7 @@ async function initDB() {
       await db.query(`CREATE INDEX IF NOT EXISTS idx_day_published  ON classified_ads (day_published)`);
     } catch (_) {}
 
-    await db.query(`
-      UPDATE classified_ads SET newspaper_name = 'Deccan Chronicle' WHERE newspaper_name IS NULL
-    `);
+    await db.query(`UPDATE classified_ads SET newspaper_name = 'Deccan Chronicle' WHERE newspaper_name IS NULL`);
     await db.query(`
       UPDATE classified_ads
       SET date_published = DATE(scraped_at), day_published = DAYNAME(scraped_at)
@@ -145,24 +178,21 @@ async function initDB() {
 
     console.log('[DB] ✅ Schema ready');
   } catch (err) {
-    console.error('[DB] initDB error:', err.message);
+    console.error('[DB] initDB error:', err.code, err.message, err);
   }
 }
 
 // ── Cron jobs ──────────────────────────────────────────────────────────────
-// Daily at 6 AM: scrape today's paper
 cron.schedule('0 6 * * *', () => {
   console.log('[CRON] 6 AM — scraping today');
   scrapeAndSave().catch(e => console.error('[CRON]', e.message));
 });
 
-// Daily at 12 PM: re-scrape today (catches late ads)
 cron.schedule('0 12 * * *', () => {
   console.log('[CRON] 12 PM — re-scraping today');
   scrapeAndSave().catch(e => console.error('[CRON]', e.message));
 });
 
-// Every Sunday at midnight: scrape full Mon-Sun week (backfill / catch up)
 cron.schedule('0 0 * * 0', () => {
   const today = new Date();
   const mon   = new Date(today);
@@ -191,19 +221,10 @@ app.get('/ads', async (req, res) => {
     if (category)    { cond.push('LOWER(COALESCE(category,     `Category`))     = LOWER(?)'); params.push(category); }
     if (subCategory) { cond.push('LOWER(COALESCE(sub_category, `Sub-Category`)) = LOWER(?)'); params.push(subCategory); }
     if (source)      { cond.push('source = ?');                                               params.push(source); }
-
-    // day filter: e.g. ?day=Sunday → all Sundays in the DB
-    if (day) {
-      cond.push('DAYNAME(date_published) = ?');
-      params.push(day);
-    }
-    // exact date filter: ?date=2026-06-22
-    if (date) {
-      cond.push('date_published = ?');
-      params.push(date);
-    }
-    if (dateFrom) { cond.push('date_published >= ?'); params.push(dateFrom); }
-    if (dateTo)   { cond.push('date_published <= ?'); params.push(dateTo); }
+    if (day)         { cond.push('DAYNAME(date_published) = ?');                              params.push(day); }
+    if (date)        { cond.push('date_published = ?');                                       params.push(date); }
+    if (dateFrom)    { cond.push('date_published >= ?');                                      params.push(dateFrom); }
+    if (dateTo)      { cond.push('date_published <= ?');                                      params.push(dateTo); }
 
     if (search) {
       const t = `%${search}%`;
@@ -225,10 +246,7 @@ app.get('/ads', async (req, res) => {
     };
     const orderBy = orderMap[sort] || 'date_published DESC, scraped_at DESC';
 
-    const [[{ total }]] = await db.query(
-      `SELECT COUNT(*) AS total FROM classified_ads ${where}`, params
-    );
-
+    const [[{ total }]] = await db.query(`SELECT COUNT(*) AS total FROM classified_ads ${where}`, params);
     const [rows] = await db.query(`
       SELECT
         id,
@@ -260,7 +278,6 @@ app.get('/ads/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: 'Invalid id' });
-
     const [rows] = await db.query(`
       SELECT
         COALESCE(category,     \`Category\`)            AS category,
@@ -275,7 +292,6 @@ app.get('/ads/:id', async (req, res) => {
       FROM classified_ads
       WHERE id = ? AND newspaper_name = 'Deccan Chronicle'
     `, [id]);
-
     if (!rows.length) return res.status(404).json({ error: 'Ad not found' });
     res.json(normalizeAd(rows[0], id));
   } catch (err) {
@@ -301,7 +317,7 @@ app.post('/ads', async (req, res) => {
     `, [
       today, dayPub, category, subCategory || 'General', title,
       description || '', location || '', price || 'Not mentioned',
-      sizeArea    || 'Not mentioned', phone, whatsapp || '', email || ''
+      sizeArea || 'Not mentioned', phone, whatsapp || '', email || ''
     ]);
     res.json({ success: true, id: result.insertId });
   } catch (err) {
@@ -310,8 +326,7 @@ app.post('/ads', async (req, res) => {
   }
 });
 
-// ── GET /days — last 7 calendar dates that have ads, with counts ────────────
-// This powers the day-pill UI so each pill shows real date + count
+// ── GET /days ──────────────────────────────────────────────────────────────
 app.get('/days', async (req, res) => {
   try {
     const [rows] = await db.query(`
@@ -340,7 +355,7 @@ app.get('/days', async (req, res) => {
 // ── GET /stats ─────────────────────────────────────────────────────────────
 app.get('/stats', async (req, res) => {
   try {
-    const [[totals]]  = await db.query(`
+    const [[totals]] = await db.query(`
       SELECT
         COUNT(*) AS total,
         SUM(date_published = CURDATE()) AS today,
@@ -360,7 +375,7 @@ app.get('/stats', async (req, res) => {
   }
 });
 
-// ── GET /scrape?date=YYYY-MM-DD — on-demand scrape (single date or today) ──
+// ── GET /scrape ────────────────────────────────────────────────────────────
 app.get('/scrape', async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   res.json({ message: `Scraping ${date}…`, status: 'started' });
@@ -369,11 +384,11 @@ app.get('/scrape', async (req, res) => {
     .catch(e => console.error('[SCRAPE]', e.message));
 });
 
-// ── GET /scrape/week — scrape full current Mon–Sun week ────────────────────
+// ── GET /scrape/week ───────────────────────────────────────────────────────
 app.get('/scrape/week', async (req, res) => {
   const today = new Date();
   const mon   = new Date(today);
-  mon.setDate(today.getDate() - today.getDay() + 1); // Monday
+  mon.setDate(today.getDate() - today.getDay() + 1);
   const monStr = mon.toISOString().slice(0, 10);
   const todStr = today.toISOString().slice(0, 10);
   res.json({ message: `Scraping full week ${monStr} → ${todStr}`, status: 'started' });
@@ -390,7 +405,6 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────
-// ── Start ──────────────────────────────────────────────────────────────────
 function startServer(port) {
   const server = app.listen(port, () =>
     console.log(`✅  ClassifiedsDesk → http://localhost:${port}`)
@@ -403,4 +417,5 @@ function startServer(port) {
 
 initDB()
   .catch(e => console.error('[DB] Fatal init error:', e.code, e.message, e))
-  .finally(() => startServer(Number(process.env.PORT) || 3001));
+  .finally(() => startServer(Number(process.env.PORT) || 8080));
+
