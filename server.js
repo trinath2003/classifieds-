@@ -16,10 +16,8 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 // ── DB pool ────────────────────────────────────────────────────────────────
-// FIX 1: mysql2 does NOT accept { uri: '...' } — pass the URL string directly
-// to createPool(), or use a plain config object. Both branches now do this correctly.
 const db = process.env.MYSQL_URL
-  ? mysql.createPool(process.env.MYSQL_URL)          // string → mysql2 parses it
+  ? mysql.createPool(process.env.MYSQL_URL)
   : mysql.createPool({
       host:               process.env.DB_HOST     || 'localhost',
       port:               Number(process.env.DB_PORT) || 3306,
@@ -102,9 +100,6 @@ function normalizeAd(row, sno) {
 }
 
 // ── DB init ────────────────────────────────────────────────────────────────
-// FIX 2: Retry with exponential backoff — Railway (and Docker) start the app
-// and DB container simultaneously, so the first connection attempt often fires
-// before the DB is accepting connections.
 async function initDB(retries = 6, delayMs = 3000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -116,7 +111,7 @@ async function initDB(retries = 6, delayMs = 3000) {
       if (attempt < retries) {
         console.log(`[DB] Retrying in ${delayMs / 1000}s…`);
         await new Promise(r => setTimeout(r, delayMs));
-        delayMs = Math.min(delayMs * 2, 30000); // exponential backoff, cap at 30s
+        delayMs = Math.min(delayMs * 2, 30000);
       } else {
         console.error('[DB] All retries exhausted. Server will start without a DB connection.');
       }
@@ -125,10 +120,8 @@ async function initDB(retries = 6, delayMs = 3000) {
 }
 
 async function _initDBOnce() {
-  // FIX 3: When using MYSQL_URL (Railway / PlanetScale / hosted MySQL), the database
-  // already exists — we must NOT try to CREATE DATABASE using that same URL because
-  // (a) hosted providers forbid it and (b) the URL already points at the DB.
-  // Only run the CREATE DATABASE bootstrap when using individual env vars (local dev).
+  // Only bootstrap CREATE DATABASE when using individual env vars (local dev).
+  // When MYSQL_URL is set (Railway / hosted MySQL), the DB already exists.
   if (!process.env.MYSQL_URL) {
     const bootstrapCfg = {
       host:           process.env.DB_HOST     || 'localhost',
@@ -145,7 +138,9 @@ async function _initDBOnce() {
     await bootstrap.end();
   }
 
-  // Step 2: create table if it doesn't exist
+  // Step 2: create table — only lowercase canonical columns, no duplicate backtick-quoted aliases.
+  // FIX: The original code had both `category` and `Category` in the same CREATE TABLE,
+  // which MySQL treats as the same column (case-insensitive) → ER_DUP_FIELDNAME crash.
   await db.query(`
     CREATE TABLE IF NOT EXISTS classified_ads (
       id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -164,19 +159,11 @@ async function _initDBOnce() {
       phone           VARCHAR(60)   DEFAULT NULL,
       whatsapp        VARCHAR(60)   DEFAULT NULL,
       email           VARCHAR(120)  DEFAULT NULL,
-      scraped_at      DATETIME      DEFAULT NULL,
-      \`Category\`             VARCHAR(100) DEFAULT NULL,
-      \`Sub-Category\`         VARCHAR(100) DEFAULT NULL,
-      \`Title/Property Type\`  TEXT         DEFAULT NULL,
-      \`Additional Details\`   TEXT         DEFAULT NULL,
-      \`Location\`             VARCHAR(255) DEFAULT NULL,
-      \`Price/Details\`        VARCHAR(100) DEFAULT NULL,
-      \`Size/Area\`            VARCHAR(100) DEFAULT NULL,
-      \`Contact\`              VARCHAR(60)  DEFAULT NULL
+      scraped_at      DATETIME      DEFAULT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  // Step 3: add any missing columns (ALTER TABLE is idempotent via IF NOT EXISTS)
+  // Step 3: add any missing columns idempotently (safe to re-run on every deploy)
   await db.query(`
     ALTER TABLE classified_ads
       ADD COLUMN IF NOT EXISTS \`newspaper_name\` VARCHAR(100)  DEFAULT NULL,
@@ -448,4 +435,3 @@ function startServer(port) {
 // then run DB init (with retries) in the background.
 startServer(Number(process.env.PORT) || 8080);
 initDB().catch(e => console.error('[DB] Fatal after all retries:', e.code, e.message));
-    
