@@ -122,8 +122,21 @@ async function initDB(retries = 6, delayMs = 3000) {
 // ── MySQL 5.7-compatible column-adder ─────────────────────────────────────
 // ALTER TABLE … ADD COLUMN IF NOT EXISTS is MySQL 8.0+ only.
 // This helper checks information_schema first, then adds only missing columns.
+
+// Extract DB name from MYSQL_URL (e.g. mysql://user:pass@host:3306/dbname)
+// so information_schema queries work correctly on Railway where DB_NAME may not be set.
+function getDbName() {
+  if (process.env.MYSQL_URL) {
+    try {
+      const url = new URL(process.env.MYSQL_URL);
+      return url.pathname.replace(/^\//, '') || 'newspaper_db';
+    } catch (_) {}
+  }
+  return process.env.DB_NAME || 'newspaper_db';
+}
+
 async function addColumnIfMissing(tableName, columnName, columnDef) {
-  const dbName = process.env.DB_NAME || 'newspaper_db';
+  const dbName = getDbName();
   const [rows] = await db.query(
     `SELECT 1 FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
