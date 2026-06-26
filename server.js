@@ -16,15 +16,19 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 // ── DB pool ────────────────────────────────────────────────────────────────
-const db = mysql.createPool({
+// Use MYSQL_URL (Railway provides this automatically) or fall back to individual vars
+const dbConfig = process.env.MYSQL_URL ? process.env.MYSQL_URL : {
   host:               process.env.DB_HOST     || 'localhost',
   port:               Number(process.env.DB_PORT) || 3306,
   user:               process.env.DB_USER     || 'root',
   password:           process.env.DB_PASSWORD || '',
   database:           process.env.DB_NAME     || 'newspaper_db',
-  waitForConnections: true,
-  connectionLimit:    10
-});
+};
+const db = mysql.createPool(
+  typeof dbConfig === 'string'
+    ? { uri: dbConfig, waitForConnections: true, connectionLimit: 10 }
+    : { ...dbConfig, waitForConnections: true, connectionLimit: 10 }
+);
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -100,15 +104,19 @@ function normalizeAd(row, sno) {
 async function initDB() {
   try {
     // Step 1: create database if it doesn't exist
-    const bootstrap = await mysql.createConnection({
-      host:           process.env.DB_HOST     || 'localhost',
-      port:           Number(process.env.DB_PORT) || 3306,
-      user:           process.env.DB_USER     || 'root',
-      password:       process.env.DB_PASSWORD || '',
-      connectTimeout: 10000,
-    });
+    const bootstrapCfg = process.env.MYSQL_URL
+      ? { uri: process.env.MYSQL_URL, connectTimeout: 10000 }
+      : {
+          host:           process.env.DB_HOST     || 'localhost',
+          port:           Number(process.env.DB_PORT) || 3306,
+          user:           process.env.DB_USER     || 'root',
+          password:       process.env.DB_PASSWORD || '',
+          connectTimeout: 10000,
+        };
+    const bootstrap = await mysql.createConnection(bootstrapCfg);
+    const dbName = process.env.DB_NAME || 'newspaper_db';
     await bootstrap.query(
-      `CREATE DATABASE IF NOT EXISTS \`${process.env.DB_NAME || 'newspaper_db'}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+      `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
     );
     await bootstrap.end();
 
