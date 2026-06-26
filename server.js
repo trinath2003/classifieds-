@@ -119,6 +119,22 @@ async function initDB(retries = 6, delayMs = 3000) {
   }
 }
 
+// ── MySQL 5.7-compatible column-adder ─────────────────────────────────────
+// ALTER TABLE … ADD COLUMN IF NOT EXISTS is MySQL 8.0+ only.
+// This helper checks information_schema first, then adds only missing columns.
+async function addColumnIfMissing(tableName, columnName, columnDef) {
+  const dbName = process.env.DB_NAME || 'newspaper_db';
+  const [rows] = await db.query(
+    `SELECT 1 FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [dbName, tableName, columnName]
+  );
+  if (!rows.length) {
+    await db.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDef}`);
+    console.log(`[DB] Added column: ${tableName}.${columnName}`);
+  }
+}
+
 async function _initDBOnce() {
   // Only bootstrap CREATE DATABASE when using individual env vars (local dev).
   // When MYSQL_URL is set (Railway / hosted MySQL), the DB already exists.
@@ -138,9 +154,9 @@ async function _initDBOnce() {
     await bootstrap.end();
   }
 
-  // Step 2: create table — only lowercase canonical columns, no duplicate backtick-quoted aliases.
-  // FIX: The original code had both `category` and `Category` in the same CREATE TABLE,
-  // which MySQL treats as the same column (case-insensitive) → ER_DUP_FIELDNAME crash.
+  // Step 2: create table — only lowercase canonical columns.
+  // No duplicate backtick-quoted aliases: MySQL is case-insensitive on column names,
+  // so having both `category` and `Category` in the same CREATE TABLE → ER_DUP_FIELDNAME.
   await db.query(`
     CREATE TABLE IF NOT EXISTS classified_ads (
       id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -163,31 +179,35 @@ async function _initDBOnce() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  // Step 3: add any missing columns idempotently (safe to re-run on every deploy)
-  await db.query(`
-    ALTER TABLE classified_ads
-      ADD COLUMN IF NOT EXISTS \`newspaper_name\` VARCHAR(100)  DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`source\`         ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper',
-      ADD COLUMN IF NOT EXISTS \`status\`         ENUM('active','pending','rejected') NOT NULL DEFAULT 'active',
-      ADD COLUMN IF NOT EXISTS \`date_published\` DATE          DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`day_published\`  VARCHAR(15)   DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`category\`       VARCHAR(60)   DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`sub_category\`   VARCHAR(60)   DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`title\`          TEXT          DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`description\`    TEXT          DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`location\`       VARCHAR(255)  DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`price\`          VARCHAR(100)  DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`size_area\`      VARCHAR(100)  DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`phone\`          VARCHAR(60)   DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`whatsapp\`       VARCHAR(60)   DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`email\`          VARCHAR(120)  DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS \`scraped_at\`     DATETIME      DEFAULT NULL
-  `);
+  // Step 3: add any missing columns — works on MySQL 5.7 AND 8.0
+  const cols = [
+    ['newspaper_name', "VARCHAR(100)  DEFAULT NULL"],
+    ['source',         "ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper'"],
+    ['status',         "ENUM('active','pending','rejected') NOT NULL DEFAULT 'active'"],
+    ['date_published', "DATE          DEFAULT NULL"],
+    ['day_published',  "VARCHAR(15)   DEFAULT NULL"],
+    ['category',       "VARCHAR(60)   DEFAULT NULL"],
+    ['sub_category',   "VARCHAR(60)   DEFAULT NULL"],
+    ['title',          "TEXT          DEFAULT NULL"],
+    ['description',    "TEXT          DEFAULT NULL"],
+    ['location',       "VARCHAR(255)  DEFAULT NULL"],
+    ['price',          "VARCHAR(100)  DEFAULT NULL"],
+    ['size_area',      "VARCHAR(100)  DEFAULT NULL"],
+    ['phone',          "VARCHAR(60)   DEFAULT NULL"],
+    ['whatsapp',       "VARCHAR(60)   DEFAULT NULL"],
+    ['email',          "VARCHAR(120)  DEFAULT NULL"],
+    ['scraped_at',     "DATETIME      DEFAULT NULL"],
+  ];
+  for (const [col, def] of cols) {
+    await addColumnIfMissing('classified_ads', col, def);
+  }
 
-  // Indexes — silently ignore duplicate-key errors
+  // Step 4: indexes — silently ignore if they already exist
   try {
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_newspaper_date ON classified_ads (newspaper_name, date_published)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_day_published  ON classified_ads (day_published)`);
+    await db.query(`CREATE INDEX idx_newspaper_date ON classified_ads (newspaper_name, date_published)`);
+  } catch (_) {}
+  try {
+    await db.query(`CREATE INDEX idx_day_published ON classified_ads (day_published)`);
   } catch (_) {}
 
   await db.query(`UPDATE classified_ads SET newspaper_name = 'Deccan Chronicle' WHERE newspaper_name IS NULL`);
@@ -435,3 +455,4 @@ function startServer(port) {
 // then run DB init (with retries) in the background.
 startServer(Number(process.env.PORT) || 8080);
 initDB().catch(e => console.error('[DB] Fatal after all retries:', e.code, e.message));
+
