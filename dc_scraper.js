@@ -155,81 +155,79 @@ async function extractAdsWithVision(imagePath) {
 //   3. Fix silently — don't flag, just correct
 //   4. Drop non-English / non-classified items
 //
-async function crossVerifyAds(rawAds, dateStr) {
+async function crossVerifyAds(rawAds, dateStr, imagePath) {
   if (!rawAds.length) return [];
 
-  // Process in batches of 20 to avoid token limits
-  const BATCH = 20;
+  const ext       = path.extname(imagePath).toLowerCase();
+  const mediaType = ext==='.png' ? 'image/png' : 'image/jpeg';
+  const imageData = fs.readFileSync(imagePath).toString('base64');
+
+  const BATCH = 15;
   const allVerified = [];
 
   for (let i = 0; i < rawAds.length; i += BATCH) {
-    const batch = rawAds.slice(i, i + BATCH);
-    console.log(`[DC] Cross-verify batch ${Math.floor(i/BATCH)+1}: ${batch.length} ads…`);
+    const batch        = rawAds.slice(i, i + BATCH);
+    const batchNum     = Math.floor(i/BATCH) + 1;
+    const totalBatches = Math.ceil(rawAds.length / BATCH);
+    console.log(`[DC] Cross-verify batch ${batchNum}/${totalBatches}: ${batch.length} ads...`);
 
-    const verifyPrompt = `You are an expert at correcting OCR errors in Indian newspaper classified advertisements (Deccan Chronicle, Hyderabad, ${dateStr}).
+    const verifyPrompt = [
+      `You are correcting classified ads extracted from Deccan Chronicle, Hyderabad, ${dateStr}.`,
+      `I am giving you (1) the ORIGINAL NEWSPAPER IMAGE and (2) TEXT auto-extracted from it.`,
+      `The text has OCR errors. Look at the image to find each ad and correct the words.`,
+      ``,
+      `EXTRACTED TEXT (has errors):`,
+      JSON.stringify(batch, null, 2),
+      ``,
+      `CORRECTION RULES (look at image to verify each word):`,
+      `- "Kal Eagineer" -> read image -> correct job title (e.g. "Civil Engineer")`,
+      `- "for Msdie Scho" -> read image -> correct school/institution name`,
+      `- "e- Pancipals, T" -> likely "Experienced Principals, Teachers"`,
+      `- "OMce Furnd" -> likely "Office Furniture"`,
+      `- "Bonerpaly" -> "Bowenpally" (Hyderabad area)`,
+      `- "Expenenced" -> "Experienced"`,
+      `- "Electrca" -> "Electrical"`,
+      `- "Regured" -> "Required"`,
+      `- "Fncla" -> "Financial"`,
+      `- "muLnipLe" -> "Multiple"`,
+      `- Symbols like a section sign or cent sign mixed in words -> remove them`,
+      `- "0" vs "O", "1" vs "l" -> use image context to decide`,
+      ``,
+      `DROP these (not real classified ads):`,
+      `- News headlines like "Turncoats likely to get" or "AAP and Shiv Sena"`,
+      `- Section headers alone with no ad body`,
+      `- Fragments under 5 meaningful words`,
+      `- Mostly non-English (Telugu or Hindi) text`,
+      ``,
+      `Return ONLY a valid JSON array. Same schema, drop invalid items:`,
+      `[{"title":"corrected title","description":"corrected English description",`,
+      ` "phone":"10 digits or empty","price":"Rs.X L or Not mentioned",`,
+      ` "location":"Hyderabad area or empty",`,
+      ` "category":"Property|Jobs|Automotive|Matrimonial|Other",`,
+      ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|General"}]`,
+    ].join('\n');
 
-The text below was extracted from a compressed newspaper image. Many words are garbled due to low image resolution and JPEG compression. Your job is to:
+    const raw = await callClaude([{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageData } },
+        { type: 'text',  text: verifyPrompt },
+      ]
+    }], 8192);
 
-1. CORRECT all OCR/compression errors using context clues
-2. VALIDATE each item is a genuine classified ad in English
-3. DROP invalid items
-
-═══ OCR CORRECTION RULES ═══
-Treat EVERY word as potentially corrupted. Common patterns:
-• Vowel swaps:    "Eagineer" → "Engineer",  "Expenenced" → "Experienced"
-• Missing vowels: "Electrca" → "Electrical", "Fncla" → "Financial"
-• Missing letters:"Regured" → "Required",   "Expenence" → "Experience"
-• Case errors:    "muLnipLe" → "Multiple",  "enaEER" → "engineer"
-• Joined words:   "abad2020" → "Hyderabad", "Prectech" → "Pretech" or brand name
-• Symbol noise:   "¢", "§", "@" mixed into words — remove them
-• Number/letter:  "0" vs "O", "1" vs "l", "5" vs "S" — use context
-• Partial words:  "Fncla Hospital" → "Financial Hospital" or "Financla" → "Financial"
-
-Use the CATEGORY and SECTION context to guide corrections:
-• Jobs section:   garbled word near "Engineer/Manager/Accountant" → fix to job title
-• Property:       garbled near "BHK/flat/sqft" → fix to property term
-• Automotive:     garbled near "car/bike/model/km" → fix to vehicle term
-• Matrimonial:    garbled near "bride/groom/alliance" → fix to matrimonial term
-
-═══ DROP THESE (not classified ads) ═══
-✗ News headlines: "Turncoats likely to get", "AAP and Shiv Sena eyes stronger"
-✗ Section headers alone: "MULTIPLE VACANCIES" with no ad body
-✗ Pure noise: random symbols, numbers only, less than 8 meaningful words
-✗ Non-English: mostly Telugu/Hindi script
-
-═══ KEEP AND CORRECT THESE ═══
-✓ "al Eagineer we, (31 Electrca Experience" → "Electrical Engineer wanted, 3-1 years Electrical Experience"
-✓ "Fncla Hospital. Regured for" → "Financial Hospital. Required for"
-✓ "muLnipLe vacancies SVK ENGINEERING" → "Multiple Vacancies SVK Engineering"
-
-Input ads:
-${JSON.stringify(batch, null, 2)}
-
-Return ONLY a valid JSON array of corrected, valid ads. Same schema:
-[{
-  "title": "corrected title",
-  "description": "fully corrected English description",
-  "phone": "10-digit number or empty string",
-  "price": "price or Not mentioned",
-  "location": "Hyderabad locality or empty string",
-  "category": "Property | Jobs | Automotive | Matrimonial | Other",
-  "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | General"
-}]`;
-
-    const raw = await callClaude([{ role:'user', content: verifyPrompt }], 8192);
-    console.log(`[DC] Batch ${Math.floor(i/BATCH)+1} response (150 chars): ${raw.slice(0,150)}`);
+    console.log(`[DC] Batch ${batchNum} (150 chars): ${raw.slice(0,150)}`);
 
     try {
       const verified = parseJSON(raw);
-      console.log(`[DC] Batch: ${batch.length} in → ${verified.length} corrected`);
+      console.log(`[DC] Batch ${batchNum}: ${batch.length} in -> ${verified.length} corrected`);
       allVerified.push(...verified);
     } catch(e) {
-      console.error(`[DC] Batch parse failed: ${e.message} — keeping raw batch`);
+      console.error(`[DC] Batch ${batchNum} parse failed: ${e.message}`);
       allVerified.push(...batch);
     }
   }
 
-  console.log(`[DC] Cross-verify total: ${rawAds.length} in → ${allVerified.length} corrected English ads`);
+  console.log(`[DC] Cross-verify: ${rawAds.length} in -> ${allVerified.length} corrected English ads`);
   return allVerified;
 }
 
@@ -465,7 +463,7 @@ async function scrapeDate(page, targetDate) {
       console.log(`[DC] Extracted: ${rawAds.length} raw items`);
 
       // STEP 2: Cross-verify — English only, real classifieds only, cleaned
-      const verifiedAds = await crossVerifyAds(rawAds, dateStr);
+      const verifiedAds = await crossVerifyAds(rawAds, dateStr, actualPath);
 
       // STEP 3: Build final objects
       const ads = buildAds(verifiedAds, targetDate);
