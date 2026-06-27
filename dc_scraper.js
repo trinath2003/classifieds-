@@ -27,36 +27,30 @@ const db = process.env.MYSQL_URL
       connectionLimit:    10,
     });
 
-// ── FIX 1: IST-aware date helpers ─────────────────────────────────────────
-// Railway runs UTC. Without offset, late-night IST runs build wrong dates.
-function toIST(d) {
-  return new Date(new Date(d).getTime() + 5.5 * 60 * 60 * 1000);
-}
-function isoDate(d)  { return toIST(d).toISOString().slice(0, 10); }
-function dayName(d)  {
+// ── IST-aware date helpers ─────────────────────────────────────────────────
+function toIST(d) { return new Date(new Date(d).getTime() + 5.5 * 60 * 60 * 1000); }
+function isoDate(d) { return toIST(d).toISOString().slice(0, 10); }
+function dayName(d) {
   return toIST(d).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' });
 }
 
-// ── FIX 2: Download image directly instead of Puppeteer screenshot ─────────
-// page.goto(imageUrl) + page.screenshot() captures the BROWSER WINDOW
-// (with chrome, padding, scaling) — OCR on that gives garbage like
-// "ALLL UVILANAN". Downloading the raw file gives clean pixel-perfect input.
+// ── Direct image download (no Puppeteer screenshot) ────────────────────────
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
     const file  = fs.createWriteStream(destPath);
-    proto.get(url, { headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-      'Referer': EPAPER_URL,
-    }}, res => {
+    proto.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+        'Referer': EPAPER_URL,
+      }
+    }, res => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        file.close();
-        fs.unlinkSync(destPath);
+        file.close(); try { fs.unlinkSync(destPath); } catch(_) {}
         return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
-        file.close();
-        try { fs.unlinkSync(destPath); } catch (_) {}
+        file.close(); try { fs.unlinkSync(destPath); } catch(_) {}
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
       res.pipe(file);
@@ -64,6 +58,27 @@ function downloadFile(url, destPath) {
       file.on('error',  reject);
     }).on('error', reject);
   });
+}
+
+// ── KEY FIX: Classifieds page validator ───────────────────────────────────
+// News pages have 0–1 phone numbers and long prose sentences.
+// A real classifieds page has 5+ phone numbers and many short ad blocks.
+// This stops news pages from being parsed as ads.
+function isClassifiedsPage(ocrText) {
+  // Count phone-like patterns (10-digit numbers starting with 6-9)
+  const phoneMatches = ocrText.match(/[6-9][0-9OoGgQqBb]{9}/g) || [];
+  const phoneCount   = phoneMatches.length;
+
+  // Count lines that are very short (typical of ad-style text)
+  const lines      = ocrText.split('\n').map(l => l.trim()).filter(Boolean);
+  const shortLines = lines.filter(l => l.length > 5 && l.length < 60).length;
+  const longLines  = lines.filter(l => l.length > 120).length; // news paragraphs
+
+  // Score: needs several phones, many short lines, few long prose lines
+  const score = phoneCount * 3 + shortLines - longLines * 2;
+
+  console.log(`[DC] Page score: phones=${phoneCount} shortLines=${shortLines} longLines=${longLines} score=${score}`);
+  return score >= 10; // threshold: must look like classifieds, not news
 }
 
 // ── Category helpers ───────────────────────────────────────────────────────
@@ -92,8 +107,7 @@ function normalizeSubCategory(category, text) {
   return 'General';
 }
 
-// ── FIX 3: OCR-tolerant phone extraction ──────────────────────────────────
-// Tesseract substitutes: 0→O/o, 6→G/g, 9→q/Q, 8→B/b
+// OCR-tolerant phone extraction
 function extractPhone(text) {
   const m = text.match(/(?:\+91[-\s]?)?[6-9GoOqQBb][0-9GoOqQBb]{9}/);
   if (!m) return '';
@@ -130,10 +144,10 @@ function extractLocation(text) {
 
 // ── Parse OCR text into ads ────────────────────────────────────────────────
 function parseAdsFromText(ocrText, publishDate) {
-  const ads       = [];
-  const lines     = ocrText.split('\n').map(l => l.trim()).filter(Boolean);
-  const today     = isoDate(publishDate);
-  const dayPub    = dayName(publishDate);
+  const ads        = [];
+  const lines      = ocrText.split('\n').map(l => l.trim()).filter(Boolean);
+  const today      = isoDate(publishDate);
+  const dayPub     = dayName(publishDate);
   const SECTION_RE = /^[A-Z][A-Z\s\/&\-]{4,}$/;
   let currentSection = 'CLASSIFIEDS';
   let block = [];
@@ -141,7 +155,6 @@ function parseAdsFromText(ocrText, publishDate) {
   function flushBlock() {
     if (!block.length) return;
     const text = block.join(' ').trim();
-    // FIX 4: No hard phone gate — keep ads even if phone OCR failed
     if (text.length < 20) { block = []; return; }
     const phone        = extractPhone(text);
     const category     = normalizeCategory(currentSection + ' ' + text);
@@ -195,28 +208,32 @@ async function saveAds(ads, publishDate) {
   return { inserted, skipped };
 }
 
-// ── FIX 5: Discover real image URLs from the live epaper DOM ──────────────
-// Instead of guessing URL patterns, we let Puppeteer load the page and
-// extract whatever image src the site actually uses for each page.
-async function discoverPageImageUrls(page, targetDate) {
+// ── Discover classifieds page number from live epaper DOM ─────────────────
+async function findClassifiedsPageNum(page, targetDate) {
   const dateStr = isoDate(targetDate);
-  console.log(`[DC] Discovering image URLs for ${dateStr}…`);
+  console.log(`[DC] Loading epaper to find classifieds page for ${dateStr}…`);
 
   await page.goto(EPAPER_URL, { waitUntil: 'networkidle2', timeout: 60000 });
   await delay(3000);
 
-  // Try selecting Hyderabad edition
+  // Select Hyderabad edition
   try {
-    await page.select('select', 'Hyderabad');
-    await delay(2000);
+    const selected = await page.evaluate(() => {
+      for (const sel of document.querySelectorAll('select')) {
+        const opt = [...sel.options].find(o => /hyderabad/i.test(o.text));
+        if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change')); return true; }
+      }
+      return false;
+    });
+    if (selected) await delay(2000);
   } catch (_) {}
 
   // Select date if not today
   const todayStr = isoDate(new Date());
   if (dateStr !== todayStr) {
-    const ist      = toIST(targetDate);
-    const label    = ist.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    console.log(`[DC] Selecting date label: "${label}"`);
+    const ist   = toIST(targetDate);
+    const label = ist.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    console.log(`[DC] Selecting date: "${label}"`);
     try {
       const ok = await page.evaluate((lbl) => {
         for (const sel of document.querySelectorAll('select')) {
@@ -230,52 +247,72 @@ async function discoverPageImageUrls(page, targetDate) {
           page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }),
           delay(12000),
         ]);
-        await delay(2000);
+        await delay(3000);
       }
     } catch (_) {}
   }
 
-  // Click Thumbnails to reveal all page labels
-  try {
-    await page.evaluate(() => {
-      if (typeof __doPostBack === 'function') __doPostBack('btn_thumbnails', '');
-    });
-    await delay(4000);
-  } catch (_) {}
+  // Try multiple ways to reveal the thumbnail/page list
+  const triggerMethods = [
+    () => page.evaluate(() => { if (typeof __doPostBack === 'function') __doPostBack('btn_thumbnails', ''); }),
+    () => page.evaluate(() => {
+      const el = [...document.querySelectorAll('a,button,span,div')]
+        .find(e => /thumbnail/i.test(e.textContent) || /thumbnail/i.test(e.id));
+      if (el) el.click();
+    }),
+    () => page.evaluate(() => {
+      const el = [...document.querySelectorAll('a,button')]
+        .find(e => /all pages/i.test(e.textContent));
+      if (el) el.click();
+    }),
+  ];
 
-  // Grab every img src from the page that looks like a newspaper page image
-  const allImgSrcs = await page.evaluate(() =>
-    [...document.querySelectorAll('img')]
-      .map(i => i.src)
-      .filter(s => s && (s.includes('.jpg') || s.includes('.png') || s.includes('Page')) &&
-                   !s.includes('logo') && !s.includes('icon') &&
-                   !s.includes('fb.') && !s.includes('tw.'))
-  );
+  for (const trigger of triggerMethods) {
+    try { await trigger(); await delay(3000); } catch (_) {}
+  }
 
-  // Find the CLASSIFIEDS page number from thumbnail labels
-  const classifiedsPageNum = await page.evaluate(() => {
+  // Search DOM for CLASSIFIEDS page number
+  const pageNum = await page.evaluate(() => {
+    // Method 1: text node walker
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
       const t = node.textContent.trim().toUpperCase();
-      const m = t.match(/CLASSIFIEDS\((\d+)\)/);
+      const m = t.match(/CLASSIFIEDS\s*\(?\s*(\d+)\s*\)?/);
       if (m) return parseInt(m[1]);
     }
-    // Also check element text
+    // Method 2: all elements by text content
     for (const el of document.querySelectorAll('*')) {
       const t = el.textContent.trim().toUpperCase();
-      if (t.startsWith('CLASSIFIEDS(') && t.length < 25) {
-        const m = t.match(/\((\d+)\)/);
+      if (t.includes('CLASSIFIEDS') && t.length < 30) {
+        const m = t.match(/(\d+)/);
         if (m) return parseInt(m[1]);
+      }
+    }
+    // Method 3: look for anchor/button with page number near "CLASSIFIEDS" text
+    const els = [...document.querySelectorAll('td, li, div, span')];
+    for (let i = 0; i < els.length; i++) {
+      if (/classif/i.test(els[i].textContent) && i + 2 < els.length) {
+        const nearby = els[i].textContent + (els[i+1]?.textContent || '') + (els[i+2]?.textContent || '');
+        const m = nearby.match(/(\d+)/);
+        if (m && parseInt(m[1]) > 5) return parseInt(m[1]);
       }
     }
     return null;
   });
 
-  console.log(`[DC] CLASSIFIEDS page number from DOM: ${classifiedsPageNum}`);
-  console.log(`[DC] All img srcs found (${allImgSrcs.length}):`, allImgSrcs.slice(0, 8));
+  // Also grab all img srcs for reference
+  const allImgSrcs = await page.evaluate(() =>
+    [...document.querySelectorAll('img')]
+      .map(i => i.src)
+      .filter(s => s && (s.includes('.jpg') || s.includes('.png')) &&
+                   !s.includes('logo') && !s.includes('icon') &&
+                   !s.includes('fb.') && !s.includes('tw.'))
+  );
 
-  return { classifiedsPageNum, allImgSrcs };
+  console.log(`[DC] CLASSIFIEDS page from DOM: ${pageNum}`);
+  console.log(`[DC] Img srcs found: ${allImgSrcs.length} — sample: ${allImgSrcs.slice(0,3).join(', ')}`);
+  return { pageNum, allImgSrcs };
 }
 
 // ── Core: scrape one date ──────────────────────────────────────────────────
@@ -284,23 +321,27 @@ async function scrapeDate(page, targetDate) {
   const [yyyy, mm, dd] = dateStr.split('-');
   console.log(`\n[DC] ══ Scraping ${dateStr} ══`);
 
-  const { classifiedsPageNum, allImgSrcs } = await discoverPageImageUrls(page, targetDate);
+  const { pageNum: classifiedsPageNum, allImgSrcs } = await findClassifiedsPageNum(page, targetDate);
 
-  // Build candidate URLs from known DC patterns + any DOM-discovered URLs
-  // FIX 6: Expanded page range — DC Hyd classifieds can be on pages 8-20
+  // Build page list to try
+  // If we know the exact page, only try that + adjacent pages.
+  // If not, scan ALL pages 1-24 but use isClassifiedsPage() to filter.
   const pagesToTry = classifiedsPageNum
-    ? [classifiedsPageNum, classifiedsPageNum + 1]
-    : [8,9,10,11,12,13,14,15,16,17,18,19,20];
+    ? [classifiedsPageNum - 1, classifiedsPageNum, classifiedsPageNum + 1].filter(n => n > 0)
+    : Array.from({ length: 24 }, (_, i) => i + 1); // scan all 24 pages
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
+  let classifiedsFound = false;
 
   for (const pgNum of pagesToTry) {
-    // Prefer any URL already discovered in DOM for this page number
+    // If we already found classifieds pages and this one is far from them, stop
+    if (classifiedsFound && !classifiedsPageNum && pgNum > (allAds.length ? pgNum : 24)) break;
+
+    // Build candidate URLs — prefer DOM-discovered, then try known patterns
     const domUrl = allImgSrcs.find(u =>
       new RegExp(`[/_]${pgNum}[._]`).test(u) || u.endsWith(`/${pgNum}.jpg`) || u.endsWith(`/${pgNum}.png`)
     );
-
     const candidateUrls = [
       ...(domUrl ? [domUrl] : []),
       `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
@@ -310,60 +351,60 @@ async function scrapeDate(page, targetDate) {
       `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/${String(pgNum).padStart(2,'0')}.jpg`,
     ];
 
-    let fetched = false;
+    const imgPath = path.join(tmpDir, `page_${pgNum}.jpg`);
+    let downloaded = false;
+
     for (const url of candidateUrls) {
-      const imgPath = path.join(tmpDir, `page_${pgNum}.jpg`);
       try {
-        console.log(`[DC] Downloading: ${url}`);
-        // ── THE KEY FIX: download the raw image file, don't screenshot a browser ──
         await downloadFile(url, imgPath);
         const stat = fs.statSync(imgPath);
-        console.log(`[DC] ✓ Downloaded page ${pgNum} (${(stat.size/1024).toFixed(0)} KB) from ${url}`);
-
         if (stat.size < 5000) {
-          console.log(`[DC] File too small (${stat.size} bytes) — likely an error page, skipping`);
-          fs.unlinkSync(imgPath);
+          console.log(`[DC] Page ${pgNum}: too small (${stat.size}B) — skipping`);
+          try { fs.unlinkSync(imgPath); } catch(_) {}
           continue;
         }
-
-        // OCR the raw downloaded image — clean pixels, no browser chrome
-        const { data } = await Tesseract.recognize(imgPath, 'eng', {
-          logger: () => {},
-          tessedit_pageseg_mode: '1',
-        });
-        const ocrText = data.text;
-
-        console.log(`[DC] OCR page ${pgNum} preview:\n  ${ocrText.slice(0, 400).replace(/\n/g, '\n  ')}`);
-        console.log(`[DC] OCR total chars: ${ocrText.length}`);
-
-        // Only parse pages that actually contain classifieds content
-        const looksLikeClassifieds =
-          /classif|property|matrimon|job|automotive|wanted|required|rent|sale|flat|bhk|bride|groom/i.test(ocrText);
-        if (!looksLikeClassifieds && !classifiedsPageNum) {
-          console.log(`[DC] Page ${pgNum} doesn't look like classifieds — skipping`);
-          fs.unlinkSync(imgPath);
-          fetched = true; // mark as fetched so we don't do viewer fallback
-          break;
-        }
-
-        const parsed = parseAdsFromText(ocrText, targetDate);
-        console.log(`[DC] Page ${pgNum}: parsed ${parsed.length} ads`);
-        allAds.push(...parsed);
-        try { fs.unlinkSync(imgPath); } catch (_) {}
-        fetched = true;
+        console.log(`[DC] ✓ Page ${pgNum} downloaded (${(stat.size/1024).toFixed(0)}KB)`);
+        downloaded = true;
         break;
       } catch (e) {
-        console.log(`[DC] Failed (${e.message.slice(0, 60)}): ${url}`);
-        try { fs.unlinkSync(imgPath); } catch (_) {}
+        try { fs.unlinkSync(imgPath); } catch(_) {}
       }
     }
 
-    if (!fetched) {
-      console.log(`[DC] All URLs failed for page ${pgNum}`);
+    if (!downloaded) {
+      if (classifiedsPageNum) console.log(`[DC] Page ${pgNum}: all URLs failed`);
+      continue;
     }
+
+    // OCR the raw image
+    const { data } = await Tesseract.recognize(imgPath, 'eng', {
+      logger: () => {},
+      tessedit_pageseg_mode: '1',
+    });
+    const ocrText = data.text;
+    try { fs.unlinkSync(imgPath); } catch(_) {}
+
+    console.log(`[DC] Page ${pgNum} OCR preview: ${ocrText.slice(0, 200).replace(/\n/g,' ')}`);
+
+    // ── THE KEY CHECK: is this actually a classifieds page? ──────────────
+    if (!isClassifiedsPage(ocrText)) {
+      console.log(`[DC] Page ${pgNum}: NOT a classifieds page — skipping`);
+      continue;
+    }
+
+    console.log(`[DC] Page ${pgNum}: ✓ CLASSIFIEDS PAGE DETECTED`);
+    classifiedsFound = true;
+
+    const parsed = parseAdsFromText(ocrText, targetDate);
+    console.log(`[DC] Page ${pgNum}: parsed ${parsed.length} ads`);
+    allAds.push(...parsed);
+
+    // If we're in scan mode (no known page num) and found 2+ consecutive
+    // classifieds pages then stopped finding them, we can break early
+    if (!classifiedsPageNum && classifiedsFound && parsed.length === 0) break;
   }
 
-  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch(_) {}
 
   // Deduplicate
   const seen   = new Set();
@@ -408,13 +449,13 @@ async function scrapeAndSave(dateFrom, dateTo) {
         console.log(`[DC] ✓ ${isoDate(date)}: inserted=${result.inserted} skipped=${result.skipped} total=${ads.length}`);
         summary.push({ date: isoDate(date), day: dayName(date), ...result, total: ads.length });
       } catch (err) {
-        console.error(`[DC] ✗ Error on ${isoDate(date)}: ${err.message}`);
+        console.error(`[DC] ✗ ${isoDate(date)}: ${err.message}`);
         summary.push({ date: isoDate(date), error: err.message });
       }
     }
   } finally {
     await browser.close();
-    if (require.main === module) { try { await db.end(); } catch (_) {} }
+    if (require.main === module) { try { await db.end(); } catch(_) {} }
   }
 
   console.log('\n[DC] ══ Scrape complete ══');
