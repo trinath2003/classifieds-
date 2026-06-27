@@ -135,64 +135,102 @@ async function extractAdsWithVision(imagePath) {
   return parseJSON(raw);
 }
 
-// ── STEP 2: Cross-verify each ad is English + genuine classified ───────────
+// ── STEP 2: Cross-verify + OCR ambiguity correction ───────────────────────
 //
-// WHY: Claude Vision sometimes picks up:
-//   - News headlines that happen to be near the classifieds section
-//   - Telugu/Hindi words mixed into descriptions
-//   - Section header text mistaken as an ad
-//   - Garbled OCR fragments
+// WHY: Even after Claude Vision extracts text, words can be garbled because
+//   the newspaper image is compressed and small. Examples seen in real output:
+//     "Eagineer"   → "Engineer"      (vowel swap)
+//     "Expenenced" → "Experienced"   (missing letter)
+//     "Fncla"      → "Financial"     (compression artifact)
+//     "Regured"    → "Required"      (transposition)
+//     "Electrca"   → "Electrical"    (dropped vowel)
+//     "muLnipLe"   → "Multiple"      (case corruption)
+//     "Prectech"   → "Pretech / Prakash" (context-guessed)
+//     "CO2683"     → probably a phone/ref number
+//     "abad2020"   → "Hyderabad 2020" (city name OCR error)
 //
-// HOW: We send all extracted ads to Claude in one batch and ask it to
-//   verify each one: is it (a) in English, (b) a real classified ad?
-//   Returns cleaned versions of valid ads only.
+// HOW: Send ads to Claude with explicit instructions to:
+//   1. Treat every word as potentially OCR-corrupted
+//   2. Use surrounding context to infer the intended word
+//   3. Fix silently — don't flag, just correct
+//   4. Drop non-English / non-classified items
 //
 async function crossVerifyAds(rawAds, dateStr) {
   if (!rawAds.length) return [];
 
-  console.log(`[DC] Cross-verifying ${rawAds.length} extracted ads…`);
+  // Process in batches of 20 to avoid token limits
+  const BATCH = 20;
+  const allVerified = [];
 
-  const verifyPrompt = `You are verifying classified advertisements extracted from a newspaper (Deccan Chronicle, Hyderabad, ${dateStr}).
+  for (let i = 0; i < rawAds.length; i += BATCH) {
+    const batch = rawAds.slice(i, i + BATCH);
+    console.log(`[DC] Cross-verify batch ${Math.floor(i/BATCH)+1}: ${batch.length} ads…`);
 
-Here are the extracted items:
-${JSON.stringify(rawAds, null, 2)}
+    const verifyPrompt = `You are an expert at correcting OCR errors in Indian newspaper classified advertisements (Deccan Chronicle, Hyderabad, ${dateStr}).
 
-For EACH item, check:
-1. Is the text PRIMARILY IN ENGLISH? (reject items with mostly Telugu/Hindi script)
-2. Is it a GENUINE CLASSIFIED AD? (reject news headlines, editorial sentences, section headers, fragments under 10 words)
-3. Does the title/description make sense as an advertisement?
+The text below was extracted from a compressed newspaper image. Many words are garbled due to low image resolution and JPEG compression. Your job is to:
 
-A genuine classified ad looks like:
-✓ "2BHK flat for sale in Kondapur, 1200sqft, Rs.65L, Contact: 9876543210"
-✓ "Required: Accountant with 2 years experience, call 9000012345"
-✓ "Maruti Swift 2019 model for sale, good condition, 9123456789"
+1. CORRECT all OCR/compression errors using context clues
+2. VALIDATE each item is a genuine classified ad in English
+3. DROP invalid items
 
-NOT a classified ad:
-✗ "Turncoats likely to get" (news headline)
-✗ "AAP and Shiv Sena eyes stronger" (news)
-✗ "MULTIPLE VACANCIES" (section header only, no ad content)
-✗ "ov enaEER caput of" (garbled OCR fragment)
+═══ OCR CORRECTION RULES ═══
+Treat EVERY word as potentially corrupted. Common patterns:
+• Vowel swaps:    "Eagineer" → "Engineer",  "Expenenced" → "Experienced"
+• Missing vowels: "Electrca" → "Electrical", "Fncla" → "Financial"
+• Missing letters:"Regured" → "Required",   "Expenence" → "Experience"
+• Case errors:    "muLnipLe" → "Multiple",  "enaEER" → "engineer"
+• Joined words:   "abad2020" → "Hyderabad", "Prectech" → "Pretech" or brand name
+• Symbol noise:   "¢", "§", "@" mixed into words — remove them
+• Number/letter:  "0" vs "O", "1" vs "l", "5" vs "S" — use context
+• Partial words:  "Fncla Hospital" → "Financial Hospital" or "Financla" → "Financial"
 
-For valid ads, also:
-- Clean up any garbled words to the most likely English word
-- Fix obvious OCR errors (e.g. "muLnipLe" → "Multiple", "Secunderabad" not "Secundurabad")  
-- Ensure phone numbers are exactly 10 digits
-- Keep description in clean English only, remove any non-English characters
+Use the CATEGORY and SECTION context to guide corrections:
+• Jobs section:   garbled word near "Engineer/Manager/Accountant" → fix to job title
+• Property:       garbled near "BHK/flat/sqft" → fix to property term
+• Automotive:     garbled near "car/bike/model/km" → fix to vehicle term
+• Matrimonial:    garbled near "bride/groom/alliance" → fix to matrimonial term
 
-Return ONLY a JSON array of VALID ads after cleaning (same schema, drop invalid ones):
-[{"title":"...","description":"...","phone":"...","price":"...","location":"...","category":"...","sub_category":"..."}]`;
+═══ DROP THESE (not classified ads) ═══
+✗ News headlines: "Turncoats likely to get", "AAP and Shiv Sena eyes stronger"
+✗ Section headers alone: "MULTIPLE VACANCIES" with no ad body
+✗ Pure noise: random symbols, numbers only, less than 8 meaningful words
+✗ Non-English: mostly Telugu/Hindi script
 
-  const raw = await callClaude([{ role:'user', content: verifyPrompt }], 8192);
-  console.log(`[DC] Verify raw (200 chars): ${raw.slice(0,200)}`);
+═══ KEEP AND CORRECT THESE ═══
+✓ "al Eagineer we, (31 Electrca Experience" → "Electrical Engineer wanted, 3-1 years Electrical Experience"
+✓ "Fncla Hospital. Regured for" → "Financial Hospital. Required for"
+✓ "muLnipLe vacancies SVK ENGINEERING" → "Multiple Vacancies SVK Engineering"
 
-  try {
-    const verified = parseJSON(raw);
-    console.log(`[DC] Cross-verify: ${rawAds.length} in → ${verified.length} valid English classified ads`);
-    return verified;
-  } catch(e) {
-    console.error(`[DC] Cross-verify parse failed: ${e.message} — using raw ads`);
-    return rawAds;
+Input ads:
+${JSON.stringify(batch, null, 2)}
+
+Return ONLY a valid JSON array of corrected, valid ads. Same schema:
+[{
+  "title": "corrected title",
+  "description": "fully corrected English description",
+  "phone": "10-digit number or empty string",
+  "price": "price or Not mentioned",
+  "location": "Hyderabad locality or empty string",
+  "category": "Property | Jobs | Automotive | Matrimonial | Other",
+  "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | General"
+}]`;
+
+    const raw = await callClaude([{ role:'user', content: verifyPrompt }], 8192);
+    console.log(`[DC] Batch ${Math.floor(i/BATCH)+1} response (150 chars): ${raw.slice(0,150)}`);
+
+    try {
+      const verified = parseJSON(raw);
+      console.log(`[DC] Batch: ${batch.length} in → ${verified.length} corrected`);
+      allVerified.push(...verified);
+    } catch(e) {
+      console.error(`[DC] Batch parse failed: ${e.message} — keeping raw batch`);
+      allVerified.push(...batch);
+    }
   }
+
+  console.log(`[DC] Cross-verify total: ${rawAds.length} in → ${allVerified.length} corrected English ads`);
+  return allVerified;
 }
 
 // ── STEP 3: Build final ad objects ─────────────────────────────────────────
