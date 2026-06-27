@@ -1,5 +1,5 @@
 // dc_scraper.js — Deccan Chronicle e-paper Classifieds Scraper
-// Navigation: states.aspx → HYDERABAD → date select → page 8 (CLASSIFIEDS)
+// Flow: states.aspx → HYDERABAD → date select → page 8 → split 5 cols → OCR each col
 require('dotenv').config();
 const puppeteer = require('puppeteer');
 const Tesseract = require('tesseract.js');
@@ -12,7 +12,9 @@ const os        = require('os');
 
 const NEWSPAPER        = 'Deccan Chronicle';
 const STATES_URL       = 'http://epaper.deccanchronicle.com/states.aspx';
-const CLASSIFIEDS_PAGE = 8; // Always page 8 for Hyderabad edition
+const CLASSIFIEDS_PAGE = 8;
+const NUM_COLUMNS      = 5;   // DC Hyderabad classifieds always 5 columns
+const SCALE            = 3;   // 3× upscale so each column is ~450px wide for Tesseract
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -29,14 +31,14 @@ const db = process.env.MYSQL_URL
       connectionLimit:    10,
     });
 
-// ── IST-aware date helpers ─────────────────────────────────────────────────
+// ── IST date helpers ───────────────────────────────────────────────────────
 function toIST(d)   { return new Date(new Date(d).getTime() + 5.5 * 60 * 60 * 1000); }
 function isoDate(d) { return toIST(d).toISOString().slice(0, 10); }
 function dayName(d) {
   return toIST(d).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' });
 }
 
-// ── Direct image download ──────────────────────────────────────────────────
+// ── Download raw image ─────────────────────────────────────────────────────
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
@@ -57,120 +59,151 @@ function downloadFile(url, destPath) {
       }
       res.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
-      file.on('error', reject);
+      file.on('error',  reject);
     }).on('error', reject);
   });
 }
 
-// ── KEY FIX 1: Upscale image 3x using Puppeteer before OCR ───────────────
-// The DC classifieds page has 5 dense columns of tiny text (~8px per line).
-// Tesseract needs at least 20px per line to read accurately.
-// We render the downloaded image at 300% in a blank Puppeteer page and
-// screenshot it — no browser chrome, just the scaled image pixels.
-async function renderHighRes(rawImagePath, hiResPath, browser) {
-  const base64 = fs.readFileSync(rawImagePath).toString('base64');
+// ── THE CORE FIX: split image into columns, OCR each separately ───────────
+//
+// WHY: Tesseract reads a 5-column newspaper page left→right, row by row.
+// Each "row" mixes text from all 5 columns → total garbage like:
+//   "H muLnipLe vacancies SVK ENGINEERING. 8 Ifa Pv Lig | COMMERCIAL §"
+//
+// FIX: Crop each column, scale it 3×, OCR it alone with PSM 6 (single block).
+// Each column then reads cleanly top→bottom within that column.
+//
+async function ocrByColumns(rawImagePath, browser, tmpDir) {
+  const base64  = fs.readFileSync(rawImagePath).toString('base64');
   const dataUrl = `data:image/jpeg;base64,${base64}`;
 
-  const pg = await browser.newPage();
+  // Step 1: get natural image dimensions
+  const dimPage = await browser.newPage();
+  let dims;
   try {
-    await pg.setContent(`
-      <html>
-        <head><style>
-          * { margin:0; padding:0; }
-          body { background:#fff; }
-          img { display:block; width:300%; height:auto; image-rendering:high-quality; }
-        </style></head>
-        <body><img id="pg" src="${dataUrl}"></body>
-      </html>
-    `);
-
-    await pg.waitForSelector('#pg', { timeout: 10000 });
-
-    // Get rendered dimensions
-    const box = await pg.$eval('#pg', el => ({
-      w: el.getBoundingClientRect().width,
-      h: el.getBoundingClientRect().height,
-    }));
-
-    await pg.setViewport({
-      width:  Math.ceil(box.w) + 20,
-      height: Math.ceil(box.h) + 20,
-    });
-
-    // Screenshot just the image element — no browser chrome
-    const imgEl = await pg.$('#pg');
-    await imgEl.screenshot({ path: hiResPath });
-
-    console.log(`[DC] High-res render: ${Math.ceil(box.w)}×${Math.ceil(box.h)}px`);
-    return true;
-  } catch(e) {
-    console.log(`[DC] High-res render failed: ${e.message} — using raw image`);
-    fs.copyFileSync(rawImagePath, hiResPath);
-    return false;
+    await dimPage.setContent(`<html><body style="margin:0;padding:0"><img id="i" src="${dataUrl}"></body></html>`);
+    await dimPage.waitForSelector('#i');
+    dims = await dimPage.$eval('#i', el => ({ w: el.naturalWidth, h: el.naturalHeight }));
+    console.log(`[DC] Image natural size: ${dims.w}×${dims.h}px`);
   } finally {
-    await pg.close();
+    await dimPage.close();
   }
+
+  const columnTexts = [];
+
+  for (let col = 0; col < NUM_COLUMNS; col++) {
+    const x = Math.floor(col       * dims.w / NUM_COLUMNS);
+    const w = Math.floor((col + 1) * dims.w / NUM_COLUMNS) - x;
+    const scaledW = w    * SCALE;
+    const scaledH = dims.h * SCALE;
+
+    const colPage = await browser.newPage();
+    const colPath = path.join(tmpDir, `col_${col}.png`);
+
+    try {
+      // Render just this column at SCALE× by positioning the full image
+      // with a negative left offset inside an overflow:hidden container
+      await colPage.setViewport({ width: scaledW, height: scaledH });
+      await colPage.setContent(`
+        <html><head><style>
+          * { margin:0; padding:0; }
+          body { background:#fff; overflow:hidden; width:${scaledW}px; height:${scaledH}px; }
+          img {
+            position:absolute;
+            left:${-x * SCALE}px;
+            top:0;
+            width:${dims.w * SCALE}px;
+            height:auto;
+            image-rendering:high-quality;
+          }
+        </style></head>
+        <body><img src="${dataUrl}"></body>
+      `);
+
+      await colPage.waitForSelector('img');
+      await delay(400); // let image paint
+
+      await colPage.screenshot({ path: colPath });
+
+      // PSM 6 = "assume single uniform block of text"
+      // This is perfect for a single newspaper column read top-to-bottom
+      const { data } = await Tesseract.recognize(colPath, 'eng', {
+        logger: () => {},
+        tessedit_pageseg_mode:    '6',
+        tessedit_ocr_engine_mode: '1', // LSTM neural net
+        preserve_interword_spaces: '1',
+      });
+
+      const preview = data.text.slice(0, 120).replace(/\n/g, ' ');
+      console.log(`[DC] Col ${col + 1} OCR: "${preview}"`);
+      columnTexts.push(data.text);
+
+    } catch(e) {
+      console.log(`[DC] Col ${col + 1} failed: ${e.message}`);
+      columnTexts.push('');
+    } finally {
+      await colPage.close();
+      try { fs.unlinkSync(colPath); } catch(_) {}
+    }
+  }
+
+  // Join columns with a clear separator the parser uses to reset section context
+  return columnTexts.join('\n\n===COLUMN_BREAK===\n\n');
 }
 
 // ── Known DC Hyderabad classifieds section headers ─────────────────────────
-// Scraped directly from the actual classifieds page layout.
-const DC_SECTIONS = [
+const DC_SECTIONS = new Set([
   'FOR SALE AUTOMOTIVE','FOUR WHEELERS','TWO WHEELERS',
   'FOR SALE PROPERTY','COMMERCIAL','MULTIPLE FLATS','INDEPENDENT HOUSE',
-  'DOUBLE BEDROOM','THREE & MORE','FARM HOUSES SITES','FLATS',
-  'SINGLE BEDROOM','INDEPENDENT HOUSES','PLOTS','VILLAS',
+  'DOUBLE BEDROOM','THREE MORE','THREE & MORE','FARM HOUSES SITES',
+  'FLATS','SINGLE BEDROOM','PLOTS','VILLAS','INDEPENDENT HOUSES',
   'LEASE','RENTALS','COMMERCIAL RENTALS','INDUSTRIAL LAND',
   'MULTIPLE VACANCIES','ACCOUNTANT','ACCOUNTANT TALLY','SECURITY',
   'FIELD OFFICERS','TEACHERS','WANTED','WANTED LADY',
-  'ACCOUNTS & FINANCE','ADVI SALES & MKTG','SALES & MARKETING',
-  'ENGINEERS','HOTEL','LAW OFFICES','LECTURERS','TUTORS',
+  'ACCOUNTS FINANCE','ACCOUNTS & FINANCE','SALES MARKETING',
+  'ADVI SALES MKTG','ENGINEERS','HOTEL','LAW OFFICES','LECTURERS',
   'FURNITURE','FINANCE','BUILDING MATERIALS','LOST','POULTRY',
-  'NOTICE','MATRIMONIAL','BRIDE WANTED','GROOM WANTED',
-  'THREE MORE','SAI KOMAL',
-];
+  'NOTICE','MATRIMONIAL','BRIDE WANTED','GROOM WANTED','TUTORS',
+  'CLASSIFIEDS','FOR RENT',
+]);
 
-// ── Category helpers ───────────────────────────────────────────────────────
-function normalizeCategory(sectionText, adText) {
-  const t = (sectionText + ' ' + adText).toUpperCase();
-  if (/(AUTOMOTIVE|CAR|BIKE|VEHICLE|FOUR.?WHEELER|TWO.?WHEELER|SUV|MOTORCYCLE|SCOOTER)/.test(t)) return 'Automotive';
-  if (/(MATRIMONIAL|BRIDE|GROOM|SHADI|ALLIANCE|MATCH\s+SOUGHT)/.test(t))                        return 'Matrimonial';
-  if (/(VACANCY|VACANCIES|HIRING|RECRUIT|WANTED|CAREER|OPENING|TEACHER|DRIVER|MANAGER|ACCOUNTANT|SECURITY|ENGINEERS?|HOTEL|LAW OFFICE|LECTURER|FIELD OFFICER|SALES|MARKETING|FINANCE\s+JOB)/.test(t)) return 'Jobs';
-  if (/(PROPERTY|RENT|RENTAL|HOSTEL|PG\b|PAYING GUEST|PLOT|FLAT|HOUSE|LAND|VILLA|APARTMENT|SHOP|BHK|SQFT|BEDROOM|LEASE|COMMERCIAL|FARM|INDUSTRIAL)/.test(t)) return 'Property';
+// ── Category mapping ───────────────────────────────────────────────────────
+function normalizeCategory(section, text) {
+  const t = (section + ' ' + text).toUpperCase();
+  if (/(AUTOMOTIVE|FOUR WHEELER|TWO WHEELER|CAR|BIKE|VEHICLE|SUV|SCOOTER)/.test(t)) return 'Automotive';
+  if (/(MATRIMONIAL|BRIDE|GROOM|ALLIANCE)/.test(t))                                  return 'Matrimonial';
+  if (/(VACANC|VACANCIE|HIRING|ACCOUNTANT|SECURITY|FIELD OFFICER|TEACHER|ENGINEER|LECTURER|HOTEL|LAW OFFICE|SALES|MARKET|WANTED|RECRUIT|CAREER|OPENING)/.test(t)) return 'Jobs';
+  if (/(PROPERTY|RENT|RENTAL|PLOT|FLAT|HOUSE|LAND|VILLA|APART|SHOP|BHK|SQFT|BEDROOM|LEASE|COMMERCIAL|FARM|INDUSTRIAL|HOSTEL|PG\b)/.test(t)) return 'Property';
   return 'Other';
 }
 function normalizeSubCategory(category, text) {
-  const lower = text.toLowerCase();
+  const l = text.toLowerCase();
   if (category === 'Property') {
-    if (lower.includes('rent') || lower.includes('lease') || lower.includes('rental')) return 'For Rent';
-    if (lower.includes('pg') || lower.includes('hostel') || lower.includes('paying guest')) return 'PG / Hostel';
+    if (l.includes('rent') || l.includes('lease'))                               return 'For Rent';
+    if (l.includes('pg') || l.includes('hostel') || l.includes('paying guest')) return 'PG / Hostel';
     return 'For Sale';
   }
   if (category === 'Automotive')  return 'Used vehicle';
-  if (category === 'Jobs')        return lower.includes('part') ? 'Part-time' : 'Full-time';
+  if (category === 'Jobs')        return l.includes('part') ? 'Part-time' : 'Full-time';
   if (category === 'Matrimonial') {
-    if (lower.includes('bride') || lower.includes('girl')) return 'Bride Sought';
-    if (lower.includes('groom') || lower.includes('boy'))  return 'Groom Sought';
+    if (l.includes('bride') || l.includes('girl')) return 'Bride Sought';
+    if (l.includes('groom') || l.includes('boy'))  return 'Groom Sought';
     return 'Alliance';
   }
   return 'General';
 }
 
-// OCR-tolerant phone extraction
 function extractPhone(text) {
   const m = text.match(/(?:\+91[-\s]?)?[6-9GoOqQBb][0-9GoOqQBb]{9}/);
   if (!m) return '';
-  const fixed = m[0]
-    .replace(/[Oo]/g,'0').replace(/[Gg]/g,'6')
-    .replace(/[qQ]/g,'9').replace(/[Bb]/g,'8')
-    .replace(/\D/g,'');
-  return fixed.length >= 10 ? fixed.slice(-10) : '';
+  const f = m[0].replace(/[Oo]/g,'0').replace(/[Gg]/g,'6').replace(/[qQ]/g,'9').replace(/[Bb]/g,'8').replace(/\D/g,'');
+  return f.length >= 10 ? f.slice(-10) : '';
 }
 function extractPrice(text) {
   let m = text.match(/(?:₹|Rs\.?)\s*([\d,.]+)\s*Cr(?:ore)?/i); if (m) return `₹${m[1].trim()} Cr`;
   m = text.match(/(?:₹|Rs\.?)\s*([\d,.]+)\s*L(?:akh)?\b/i);   if (m) return `₹${m[1].trim()} L`;
-  m = text.match(/(?:₹|Rs\.?)\s*([\d,]+)\s*(?:lac|lakh)/i);   if (m) return `₹${m[1]} L`;
-  m = text.match(/(?:₹|Rs\.?)\s*([\d,]{4,})/);                 if (m) return `₹${m[1]}`;
   m = text.match(/(\d+)\s*(?:lac|lakh)/i);                     if (m) return `₹${m[1]} L`;
+  m = text.match(/(?:₹|Rs\.?)\s*([\d,]{4,})/);                 if (m) return `₹${m[1]}`;
   return 'Not mentioned';
 }
 function extractSize(text) {
@@ -187,62 +220,58 @@ const HYD_LOCALITIES = [
   'Nanakramguda','Raidurg','Shamshabad','Shamirpet','Patancheru','Sangareddy',
   'Beeramguda','Bowenpally','Malkajgiri','Alwal','Yapral','Nacharam',
   'Hayathnagar','Vanasthalipuram','Saroornagar','Kothapet','Moosapet',
+  'Chintal','Jeedimetla','Balanagar','Sanath Nagar','Erragadda','SR Nagar',
 ];
 function extractLocation(text) {
+  const low = text.toLowerCase();
   for (const loc of HYD_LOCALITIES) {
-    if (text.toLowerCase().includes(loc.toLowerCase())) return `${loc}, Hyderabad`;
+    if (low.includes(loc.toLowerCase())) return `${loc}, Hyderabad`;
   }
   return '';
 }
 
-// ── KEY FIX 2: Parser rebuilt for DC's 5-column classifieds layout ─────────
-// DC classifieds OCR output has:
-//   • Section headers in ALL CAPS (often 1 line, sometimes OCR-garbled)
-//   • Ad blocks: 2-6 lines of dense text ending with a phone number
-//   • Checkmarks (✓) at start of premium ads
-//   • Mixed column reading order from Tesseract
-//
-// Strategy:
-//   • Match lines against known DC section headers (fuzzy)
-//   • Flush ad block whenever a new section or blank line appears
-//   • Keep ads even without phone (phone may be OCR'd on a separate line)
-function parseAdsFromText(ocrText, publishDate) {
+// ── Parser: processes one column's OCR text ────────────────────────────────
+function parseColumn(colText, publishDate) {
   const ads    = [];
   const today  = isoDate(publishDate);
   const dayPub = dayName(publishDate);
 
-  // Clean up common OCR noise
-  const cleaned = ocrText
-    .replace(/[✓√]/g, '')          // remove checkmarks
-    .replace(/\|/g, 'I')           // | → I (common OCR swap)
-    .replace(/['']/g, "'")         // smart quotes
-    .replace(/[""]/g, '"');
+  // Clean OCR noise
+  const cleaned = colText
+    .replace(/[✓√]/g, '')
+    .replace(/\|{2,}/g, '')
+    .replace(/['']/g, "'")
+    .replace(/[""]/g, '"')
+    .replace(/§/g, 'S')
+    .replace(/\f/g, '\n');
 
-  const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = cleaned.split('\n').map(l => l.trim()).filter(l => l.length > 1);
 
   let currentSection = 'CLASSIFIEDS';
   let block = [];
 
-  // Fuzzy section header matcher
-  // A line is a section header if:
-  // (a) it matches a known DC section exactly or closely, OR
-  // (b) it's ALL CAPS, 3-30 chars, no digits, looks like a label
   function isSectionHeader(line) {
-    const upper = line.toUpperCase().replace(/[^A-Z\s&]/g, '').trim();
-    if (upper.length < 3 || upper.length > 40) return false;
-    // Must be mostly uppercase in original
-    const alphaChars = line.replace(/[^a-zA-Z]/g, '');
-    if (alphaChars.length === 0) return false;
-    const upperRatio = (line.replace(/[^A-Z]/g, '').length) / alphaChars.length;
-    if (upperRatio < 0.7) return false;
-    // Must not look like a sentence (no long words typical of ad copy)
-    if (/\b(the|and|for|with|near|sqft|bhk|contact|call|ph:|mob:)\b/i.test(line)) return false;
-    // Match known sections
-    for (const sec of DC_SECTIONS) {
-      if (upper.includes(sec) || sec.includes(upper)) return true;
-    }
-    // Generic: short all-caps line with no digits (likely a section label)
-    if (upperRatio > 0.85 && !/\d/.test(line) && line.length < 30) return true;
+    // Must be mostly uppercase
+    const alpha = line.replace(/[^a-zA-Z]/g, '');
+    if (alpha.length < 3) return false;
+    const upRatio = line.replace(/[^A-Z]/g, '').length / alpha.length;
+    if (upRatio < 0.75) return false;
+
+    // Must not look like ad copy
+    if (/\b(the|and|for|with|near|sqft|bhk|contact|call|ph:|mob:|email|apply)\b/i.test(line)) return false;
+
+    // No digits mixed in (section headers don't have phone numbers)
+    if (/\d{5,}/.test(line)) return false;
+
+    const up = line.toUpperCase().replace(/[^A-Z\s&]/g, '').trim();
+
+    // Exact match with known sections
+    if (DC_SECTIONS.has(up)) return true;
+
+    // Fuzzy: short all-caps line (2-4 words), no digits → likely a section label
+    const words = up.split(/\s+/).filter(Boolean);
+    if (words.length >= 1 && words.length <= 4 && upRatio > 0.85 && !/\d/.test(line)) return true;
+
     return false;
   }
 
@@ -255,14 +284,12 @@ function parseAdsFromText(ocrText, publishDate) {
     const category     = normalizeCategory(currentSection, text);
     const sub_category = normalizeSubCategory(category, currentSection + ' ' + text);
 
-    // Clean up the title: take first meaningful line
-    let title = block[0].replace(/^[^a-zA-Z0-9₹]+/, '').slice(0, 120).trim();
-    if (title.length < 4) title = block[1]?.slice(0, 120).trim() || title;
+    // Use first non-noise line as title
+    let title = block.find(l => l.length > 4)?.replace(/^[^a-zA-Z0-9₹]+/, '').slice(0, 120).trim() || text.slice(0, 80);
 
     ads.push({
       date_published: today, day_published: dayPub,
-      category, sub_category,
-      title,
+      category, sub_category, title,
       description: text,
       location:    extractLocation(text),
       price:       extractPrice(text),
@@ -274,37 +301,46 @@ function parseAdsFromText(ocrText, publishDate) {
   }
 
   for (const line of lines) {
-    // Skip very short noise lines (single chars, dashes, page numbers)
-    if (line.length < 3) { flushBlock(); continue; }
-    if (/^[\-–—=_*#]+$/.test(line)) { flushBlock(); continue; }
-    if (/^\d{1,3}$/.test(line)) { flushBlock(); continue; } // page numbers
+    if (line.length < 2) continue;
+    if (/^[\-–—=_*#.]+$/.test(line)) { flushBlock(); continue; }
+    if (/^\d{1,3}$/.test(line))       { continue; } // page numbers
 
     if (isSectionHeader(line)) {
       flushBlock();
       currentSection = line.toUpperCase().trim();
-      console.log(`[DC] Section: ${currentSection}`);
+      console.log(`[DC]   § ${currentSection}`);
       continue;
     }
 
     block.push(line);
 
-    // Flush after a phone number appears (end of ad)
-    if (extractPhone(line)) {
-      flushBlock();
-    }
+    // End of ad: flush when phone number found
+    if (extractPhone(line)) flushBlock();
   }
   flushBlock();
   return ads;
 }
 
+// ── Parse all columns ──────────────────────────────────────────────────────
+function parseAdsFromColumns(combinedText, publishDate) {
+  const columns = combinedText.split('===COLUMN_BREAK===');
+  const allAds  = [];
+  columns.forEach((colText, i) => {
+    const ads = parseColumn(colText.trim(), publishDate);
+    console.log(`[DC] Column ${i + 1}: ${ads.length} ads`);
+    allAds.push(...ads);
+  });
+  return allAds;
+}
+
 // ── Classifieds page validator ─────────────────────────────────────────────
-function isClassifiedsPage(ocrText) {
-  const phones     = (ocrText.match(/[6-9][0-9OoGgQqBb]{9}/g) || []).length;
-  const lines      = ocrText.split('\n').filter(l => l.trim());
-  const shortLines = lines.filter(l => l.trim().length < 80).length;
-  const longLines  = lines.filter(l => l.trim().length > 150).length;
-  const score      = phones * 3 + shortLines - longLines * 2;
-  console.log(`[DC] Page check: phones=${phones} short=${shortLines} long=${longLines} → score=${score}`);
+function isClassifiedsPage(text) {
+  const phones = (text.match(/[6-9][0-9OoGgQqBb]{9}/g) || []).length;
+  const lines  = text.split('\n').filter(l => l.trim());
+  const short  = lines.filter(l => l.trim().length < 80).length;
+  const long   = lines.filter(l => l.trim().length > 150).length;
+  const score  = phones * 3 + short - long * 2;
+  console.log(`[DC] Classifieds check: phones=${phones} score=${score}`);
   return score >= 8;
 }
 
@@ -339,32 +375,26 @@ async function scrapeDate(page, browser, targetDate) {
   const dateStr        = isoDate(targetDate);
   const [yyyy, mm, dd] = dateStr.split('-');
   const todayStr       = isoDate(new Date());
-  console.log(`\n[DC] ══ Scraping ${dateStr} ══`);
+  console.log(`\n[DC] ══ Scraping ${dateStr} (${dayName(targetDate)}) ══`);
 
-  // Step 1: Load states.aspx and click HYDERABAD
-  console.log('[DC] Loading states.aspx…');
+  // Navigate: states.aspx → click HYDERABAD
   await page.goto(STATES_URL, { waitUntil: 'networkidle2', timeout: 60000 });
   await delay(2000);
 
   const hydClicked = await page.evaluate(() => {
-    const links = [...document.querySelectorAll('a')];
-    const hyd   = links.find(a => a.textContent.trim().toUpperCase() === 'HYDERABAD');
+    const hyd = [...document.querySelectorAll('a')]
+      .find(a => a.textContent.trim().toUpperCase() === 'HYDERABAD');
     if (hyd) { hyd.click(); return true; }
     return false;
   });
   console.log(`[DC] HYDERABAD clicked: ${hydClicked}`);
-
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }),
-    delay(20000),
-  ]);
+  await Promise.race([page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }), delay(20000)]);
   await delay(3000);
-  console.log(`[DC] Viewer URL: ${page.url()}`);
 
-  // Step 2: Select date if not today
+  // Select date if not today
   if (dateStr !== todayStr) {
     const ist   = toIST(targetDate);
-    const month = ist.toLocaleDateString('en-US', { month: 'short' }); // "Jun"
+    const month = ist.toLocaleDateString('en-US', { month: 'short' });
     const day   = ist.getDate();
     const year  = ist.getFullYear();
     console.log(`[DC] Selecting date: ${month} ${day}, ${year}`);
@@ -380,40 +410,32 @@ async function scrapeDate(page, browser, targetDate) {
       return null;
     }, month, day, year);
 
-    console.log(`[DC] Date picked: ${picked}`);
+    console.log(`[DC] Date selected: ${picked}`);
     if (picked) {
-      await Promise.race([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
-        delay(15000),
-      ]);
+      await Promise.race([page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }), delay(15000)]);
       await delay(3000);
     }
   }
 
-  // Step 3: Try to get DOM image URL for page 8 from the thumbnail strip
-  // Click Thumbnails first
+  // Click Thumbnails tab
   await page.evaluate(() => {
-    const els = [...document.querySelectorAll('a,button,li,span,td')];
-    const t   = els.find(e => /^thumbnails?$/i.test(e.textContent.trim()));
+    const t = [...document.querySelectorAll('a,button,li,span,td')]
+      .find(e => /^thumbnails?$/i.test(e.textContent.trim()));
     if (t) { t.click(); return; }
     if (typeof __doPostBack === 'function') try { __doPostBack('btn_thumbnails',''); } catch(_){}
   });
   await delay(3000);
 
-  // Grab any img srcs that look like page images
+  // Try DOM image URL for page 8
   const domImgUrl = await page.evaluate((pgNum) => {
-    const imgs = [...document.querySelectorAll('img')];
-    const match = imgs.find(img => {
-      const s = img.src;
-      return s && (s.includes('.jpg') || s.includes('.png')) &&
-             (new RegExp(`[/_]0*${pgNum}[._]`).test(s) || s.endsWith(`/${pgNum}.jpg`)) &&
-             !s.includes('logo') && !s.includes('icon');
-    });
-    return match ? match.src : null;
+    return [...document.querySelectorAll('img')]
+      .map(i => i.src)
+      .find(s => s && (s.includes('.jpg')||s.includes('.png')) &&
+                 (new RegExp(`[/_]0*${pgNum}[._]`).test(s)||s.endsWith(`/${pgNum}.jpg`)) &&
+                 !s.includes('logo') && !s.includes('icon')) || null;
   }, CLASSIFIEDS_PAGE);
-  console.log(`[DC] DOM img URL for page ${CLASSIFIEDS_PAGE}: ${domImgUrl}`);
+  console.log(`[DC] DOM img URL: ${domImgUrl}`);
 
-  // Step 4: Build candidate URLs for page 8 (and 9 as overflow)
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
 
@@ -428,7 +450,6 @@ async function scrapeDate(page, browser, targetDate) {
     ];
 
     const rawPath  = path.join(tmpDir, `raw_${pgNum}.jpg`);
-    const hiRes    = path.join(tmpDir, `hires_${pgNum}.png`);
     let downloaded = false;
 
     for (const url of candidates) {
@@ -437,48 +458,41 @@ async function scrapeDate(page, browser, targetDate) {
         await downloadFile(url, rawPath);
         const sz = fs.statSync(rawPath).size;
         if (sz < 5000) { console.log(`[DC] Too small (${sz}B)`); try{fs.unlinkSync(rawPath);}catch(_){} continue; }
-        console.log(`[DC] ✓ Downloaded (${(sz/1024).toFixed(0)}KB)`);
+        console.log(`[DC] ✓ Downloaded ${(sz/1024).toFixed(0)}KB`);
         downloaded = true;
         break;
       } catch(e) {
-        console.log(`[DC] Failed: ${e.message.slice(0,60)}`);
+        console.log(`[DC] ✗ ${e.message.slice(0,60)}`);
         try{fs.unlinkSync(rawPath);}catch(_){}
       }
     }
 
     if (!downloaded) { console.log(`[DC] Page ${pgNum}: no URL worked`); continue; }
 
-    // KEY FIX: Upscale 3x before OCR
-    console.log(`[DC] Upscaling page ${pgNum} for OCR…`);
-    await renderHighRes(rawPath, hiRes, browser);
-    try{fs.unlinkSync(rawPath);}catch(_){}
-
-    // OCR with PSM 3 (auto page segmentation — handles multi-column)
-    console.log(`[DC] Running OCR on page ${pgNum}…`);
-    const { data } = await Tesseract.recognize(hiRes, 'eng', {
+    // Quick full-page OCR first just to validate it's classifieds
+    const quickOcr = await Tesseract.recognize(rawPath, 'eng', {
       logger: () => {},
-      tessedit_pageseg_mode: '3',   // Auto — handles 5-column newspaper layout
-      tessedit_ocr_engine_mode: '1', // LSTM neural net — better accuracy
-      preserve_interword_spaces: '1',
+      tessedit_pageseg_mode: '3',
+      tessedit_ocr_engine_mode: '0', // fast legacy for validation
     });
-    try{fs.unlinkSync(hiRes);}catch(_){}
-
-    const ocrText = data.text;
-    console.log(`[DC] Page ${pgNum} OCR (first 500 chars):\n  ${ocrText.slice(0,500).replace(/\n/g,' | ')}`);
-
-    if (!isClassifiedsPage(ocrText)) {
-      console.log(`[DC] Page ${pgNum}: not a classifieds page — skipping`);
+    if (!isClassifiedsPage(quickOcr.data.text)) {
+      console.log(`[DC] Page ${pgNum}: not classifieds — skipping`);
+      try{fs.unlinkSync(rawPath);}catch(_){}
       if (pgNum > CLASSIFIEDS_PAGE) break;
       continue;
     }
+    console.log(`[DC] Page ${pgNum}: ✓ Classifieds confirmed — splitting into ${NUM_COLUMNS} columns`);
 
-    console.log(`[DC] Page ${pgNum}: ✓ Classifieds confirmed`);
-    const parsed = parseAdsFromText(ocrText, targetDate);
-    console.log(`[DC] Page ${pgNum}: ${parsed.length} ads`);
+    // THE FIX: OCR each column separately at 3× scale
+    const combinedText = await ocrByColumns(rawPath, browser, tmpDir);
+    try{fs.unlinkSync(rawPath);}catch(_){}
+
+    const parsed = parseAdsFromColumns(combinedText, targetDate);
+    console.log(`[DC] Page ${pgNum}: ${parsed.length} total ads from ${NUM_COLUMNS} columns`);
     allAds.push(...parsed);
   }
 
-  try{fs.rmSync(tmpDir, { recursive:true, force:true });}catch(_){}
+  try{fs.rmSync(tmpDir,{recursive:true,force:true});}catch(_){}
 
   // Deduplicate
   const seen   = new Set();
@@ -509,9 +523,7 @@ async function scrapeAndSave(dateFrom, dateTo) {
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1400, height: 900 });
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    );
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
 
     for (const date of dates) {
       try {
