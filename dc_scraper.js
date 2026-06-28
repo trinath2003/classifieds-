@@ -274,28 +274,51 @@ function buildAds(verifiedAds, publishDate) {
     return (ascii / text.length) > 0.7;
   }
 
+  // Phone number pattern for title check
+  const PHONE_RE = /^[+\d\s\-().]{7,}$/;
+  // Junk title patterns: just a phone, just a location, just symbols, too short
+  function isBadTitle(t) {
+    if (!t || t.length < 4) return true;
+    if (PHONE_RE.test(t.replace(/\s/g,''))) return true;  // phone as title
+    if (/^[\W\d]+$/.test(t)) return true;                 // all symbols/digits
+    if (/^(bonerpaly|bowenpally|secunderabad|hyderabad|w between|great in taste)[:\s]*$/i.test(t)) return true;
+    const words = t.trim().split(/\s+/);
+    if (words.length < 2) return true;                    // single word only
+    return false;
+  }
+
   return verifiedAds
     .filter(a => a && typeof a==='object')
     .filter(a => {
       const txt = `${a.title||''} ${a.description||''}`.trim();
-      if (txt.length < 10) return false;                    // too short
-      if (!isEnglish(txt)) return false;                    // non-English
-      if (/^\W+$/.test(a.title||'')) return false;          // title is all symbols
+      if (txt.length < 20) return false;
+      if (!isEnglish(txt)) return false;
+      if (isBadTitle(a.title||'')) return false;
+      // description must have at least 5 real words
+      const words = (a.description||'').replace(/[^a-zA-Z\s]/g,' ').trim().split(/\s+/).filter(w=>w.length>2);
+      if (words.length < 5) return false;
       return true;
     })
-    .map(a => ({
-      date_published: today,
-      day_published:  dayPub,
-      category:       a.category     || 'Other',
-      sub_category:   a.sub_category || 'General',
-      title:          String(a.title       ||'').slice(0,120).trim(),
-      description:    String(a.description ||'').trim(),
-      location:       cleanLocation(a.location||'', a.description||''),
-      price:          a.price    || 'Not mentioned',
-      size_area:      a.size_area|| 'Not mentioned',
-      phone:          cleanPhone(a.phone),
-      source: 'scraper', newspaper_name: NEWSPAPER,
-    }));
+    .map(a => {
+      // Fix: if title is garbled/fragment, use first sensible sentence from description
+      let title = String(a.title||'').slice(0,120).trim();
+      if (isBadTitle(title)) {
+        const firstSentence = (String(a.description||'').split('.')[0] || '').trim();
+      }
+      return {
+        date_published: today,
+        day_published:  dayPub,
+        category:       a.category     || 'Other',
+        sub_category:   a.sub_category || 'General',
+        title,
+        description:    String(a.description ||'').trim(),
+        location:       cleanLocation(a.location||'', a.description||''),
+        price:          a.price    || 'Not mentioned',
+        size_area:      a.size_area|| 'Not mentioned',
+        phone:          cleanPhone(a.phone),
+        source: 'scraper', newspaper_name: NEWSPAPER,
+      };
+    });
 }
 
 // ── Save to DB ─────────────────────────────────────────────────────────────
@@ -527,8 +550,35 @@ async function scrapeAndSave(dateFrom, dateTo) {
   console.log('\n[DC] ══ Done ══'); console.table(summary); return summary;
 }
 
+// ── Week date helper (IST-aware) ───────────────────────────────────────────
+// Returns the 7 dates for the current week (Mon→today) in IST.
+// Call this from your backend for "Scrape full week" to always include today.
+function getCurrentWeekDatesIST() {
+  const nowIST   = toIST(new Date());
+  const dayOfWeek = nowIST.getDay(); // 0=Sun,1=Mon,...6=Sat
+  // Week starts Monday: offset = dayOfWeek===0 ? 6 : dayOfWeek-1
+  const offset   = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const dates    = [];
+  for (let i = offset; i >= 0; i--) {
+    const d = new Date(nowIST);
+    d.setDate(d.getDate() - i);
+    dates.push(isoDate(d));
+  }
+  return dates; // e.g. ["2026-06-22","2026-06-23",...,"2026-06-28"] for a Sunday
+}
+
+// ── Scrape full current week (IST) ─────────────────────────────────────────
+async function scrapeCurrentWeek() {
+  const dates  = getCurrentWeekDatesIST();
+  const first  = dates[0];
+  const last   = dates[dates.length - 1];
+  console.log(`[DC] Scraping full week (IST): ${first} → ${last} (${dates.length} days)`);
+  return scrapeAndSave(first, last);
+}
+
 if (require.main===module) {
   const[,,a1,a2]=process.argv;
-  scrapeAndSave(a1,a2).then(()=>process.exit(0)).catch(e=>{console.error('[DC] Fatal:',e.message);process.exit(1);});
+  const cmd = a1 === '--week' ? scrapeCurrentWeek() : scrapeAndSave(a1,a2);
+  cmd.then(()=>process.exit(0)).catch(e=>{console.error('[DC] Fatal:',e.message);process.exit(1);});
 }
-module.exports = scrapeAndSave;
+module.exports = { scrapeAndSave, scrapeCurrentWeek, getCurrentWeekDatesIST, isoDate };
