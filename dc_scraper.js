@@ -405,7 +405,6 @@ async function getPageImageFromViewer(page, pgNum, outPath) {
 async function scrapeDate(page, targetDate) {
   const dateStr      = isoDate(targetDate);
   const [yyyy,mm,dd] = dateStr.split('-');
-  const todayStr     = isoDate(new Date());
   console.log(`\n[DC] ══ ${dateStr} (${dayName(targetDate)}) ══`);
 
   // Navigate: states.aspx → HYDERABAD
@@ -419,23 +418,51 @@ async function scrapeDate(page, targetDate) {
   await delay(3000);
   console.log(`[DC] Viewer: ${page.url()}`);
 
-  // Select date
-  if (dateStr !== todayStr) {
-    const ist   = toIST(targetDate);
-    const month = ist.toLocaleDateString('en-US',{month:'short'});
-    const day   = ist.getDate(), year=ist.getFullYear();
-    const picked = await page.evaluate((m,d,y) => {
-      for (const s of document.querySelectorAll('select')) {
-        const o = [...s.options].find(x=>{const t=x.text.replace(/\s+/g,' ');return t.includes(m)&&t.includes(String(d))&&t.includes(String(y));});
-        if (o) { s.value=o.value; s.dispatchEvent(new Event('change')); return o.text; }
-      }
-      return null;
-    }, month, day, year);
-    console.log(`[DC] Date: ${picked}`);
-    if (picked) {
-      await Promise.race([page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15000}), delay(15000)]);
-      await delay(3000);
+  // ── Sunday Chronicle tab ─────────────────────────────────────────────────
+  // On Sundays DC shows a "Sunday Chronicle" tab — must click it first.
+  const ist      = toIST(targetDate);
+  const isSunday = ist.getDay() === 0;
+  if (isSunday) {
+    console.log('[DC] Sunday — clicking Sunday Chronicle tab...');
+    const clicked = await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('a,button,li,span,td,div')]
+        .find(e => /sunday\s*chronicle/i.test(e.textContent.trim()));
+      if (tab) { tab.click(); return true; }
+      return false;
+    });
+    console.log(`[DC] Sunday Chronicle tab clicked: ${clicked}`);
+    if (clicked) {
+      await Promise.race([page.waitForNavigation({waitUntil:'networkidle2',timeout:15000}), delay(15000)]);
+      await delay(2000);
     }
+  }
+
+  // ── Always select the date explicitly ─────────────────────────────────────
+  // BUG FIX: previously skipped when dateStr === todayStr, which caused the
+  // viewer to stay on yesterday. Now always select the date for every scrape.
+  const month = ist.toLocaleDateString('en-US', { month:'short' });
+  const day   = ist.getDate();
+  const year  = ist.getFullYear();
+  console.log(`[DC] Selecting date: ${month} ${day}, ${year}...`);
+
+  const picked = await page.evaluate((m, d, y) => {
+    for (const s of document.querySelectorAll('select')) {
+      const o = [...s.options].find(x => {
+        const t = x.text.replace(/\s+/g,' ').trim();
+        return t.includes(m) && t.includes(String(d)) && t.includes(String(y));
+      });
+      if (o) { s.value=o.value; s.dispatchEvent(new Event('change')); return o.text; }
+    }
+    return null;
+  }, month, day, year);
+
+  console.log(`[DC] Date selected: ${picked}`);
+  if (picked) {
+    await Promise.race([page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15000}), delay(15000)]);
+    await delay(3000);
+  } else {
+    console.log('[DC] Date not found in dropdown — viewer may already be on correct date');
+    await delay(2000);
   }
 
   // Thumbnails tab
