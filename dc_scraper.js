@@ -1,5 +1,5 @@
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
-// Uses Claude Vision API + English/classified cross-verification
+// Uses Claude Vision API + cross-verification with image reference
 require('dotenv').config();
 const puppeteer = require('puppeteer');
 const mysql     = require('mysql2/promise');
@@ -11,7 +11,7 @@ const os        = require('os');
 
 const NEWSPAPER        = 'Deccan Chronicle';
 const STATES_URL       = 'http://epaper.deccanchronicle.com/states.aspx';
-const CLASSIFIEDS_PAGE = 8;
+const CLASSIFIEDS_PAGE = 8; // Always page 8 for Hyderabad edition
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -19,69 +19,72 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 const db = process.env.MYSQL_URL
   ? mysql.createPool(process.env.MYSQL_URL)
   : mysql.createPool({
-      host: process.env.DB_HOST || 'localhost',
-      port: Number(process.env.DB_PORT) || 3306,
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || 'newspaper_db',
-      waitForConnections: true, connectionLimit: 10,
+      host:               process.env.DB_HOST     || 'localhost',
+      port:               Number(process.env.DB_PORT) || 3306,
+      user:               process.env.DB_USER     || 'root',
+      password:           process.env.DB_PASSWORD || '',
+      database:           process.env.DB_NAME     || 'newspaper_db',
+      waitForConnections: true,
+      connectionLimit:    10,
     });
 
 // ── IST helpers ────────────────────────────────────────────────────────────
-function toIST(d)   { return new Date(new Date(d).getTime() + 5.5*60*60*1000); }
+function toIST(d)   { return new Date(new Date(d).getTime() + 5.5 * 60 * 60 * 1000); }
 function isoDate(d) { return toIST(d).toISOString().slice(0, 10); }
-function dayName(d) { return toIST(d).toLocaleDateString('en-IN', { weekday:'long', timeZone:'Asia/Kolkata' }); }
+function dayName(d) { return toIST(d).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' }); }
 
 // ── Download ───────────────────────────────────────────────────────────────
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
     const file  = fs.createWriteStream(dest);
-    proto.get(url, { headers:{
-      'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-      'Referer': STATES_URL,
-    }}, res => {
-      if (res.statusCode===301||res.statusCode===302) {
-        file.close(); try{fs.unlinkSync(dest);}catch(_){}
+    proto.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+        'Referer': STATES_URL,
+      }
+    }, res => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        file.close(); try { fs.unlinkSync(dest); } catch (_) {}
         return downloadFile(res.headers.location, dest).then(resolve).catch(reject);
       }
-      if (res.statusCode!==200) {
-        file.close(); try{fs.unlinkSync(dest);}catch(_){}
+      if (res.statusCode !== 200) {
+        file.close(); try { fs.unlinkSync(dest); } catch (_) {}
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
       res.pipe(file);
-      file.on('finish', ()=>{ file.close(); resolve(); });
+      file.on('finish', () => { file.close(); resolve(); });
       file.on('error', reject);
     }).on('error', reject);
   });
 }
 
-// ── Claude API helper ──────────────────────────────────────────────────────
-async function callClaude(messages, maxTokens=8192) {
+// ── Claude API ─────────────────────────────────────────────────────────────
+async function callClaude(messages, maxTokens = 8192) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
-      'Content-Type':     'application/json',
-      'x-api-key':        apiKey,
-      'anthropic-version':'2023-06-01',
+      'Content-Type':      'application/json',
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ model:'claude-opus-4-6', max_tokens:maxTokens, messages }),
+    body: JSON.stringify({ model: 'claude-opus-4-6', max_tokens: maxTokens, messages }),
   });
 
   if (!resp.ok) {
     const err = await resp.text();
-    throw new Error(`Claude API ${resp.status}: ${err.slice(0,200)}`);
+    throw new Error(`Claude API ${resp.status}: ${err.slice(0, 200)}`);
   }
   const data = await resp.json();
   return data.content?.[0]?.text || '';
 }
 
 function parseJSON(raw) {
-  const clean = raw.replace(/^```(?:json)?\n?/,'').replace(/\n?```$/,'').trim();
-  try { return JSON.parse(clean); } catch(_) {
+  const clean = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+  try { return JSON.parse(clean); } catch (_) {
     const m = clean.match(/\[[\s\S]*\]/);
     if (m) return JSON.parse(m[0]);
     throw new Error('JSON parse failed');
@@ -96,8 +99,8 @@ Extract EVERY classified advertisement visible on this page.
 IMPORTANT RULES:
 - Only extract CLASSIFIED ADS — not news headlines, not editorial content, not article text
 - Only extract text that is in ENGLISH — skip any Telugu or Hindi script text entirely
-- A classified ad typically has: a short heading, description text, and a contact number
-- Section headers like "FOR SALE PROPERTY", "MULTIPLE VACANCIES", "MATRIMONIAL", "LEASE", "RENTALS" etc. tell you the category
+- A classified ad has: a heading, description text, and usually a contact number
+- Section headers like "FOR SALE PROPERTY", "MULTIPLE VACANCIES", "MATRIMONIAL", "LEASE", "RENTALS" tell you the category
 
 Return ONLY a valid JSON array (no markdown, no explanation):
 [{
@@ -119,55 +122,42 @@ Category guide:
 
 async function extractAdsWithVision(imagePath) {
   const ext       = path.extname(imagePath).toLowerCase();
-  const mediaType = ext==='.png' ? 'image/png' : 'image/jpeg';
+  const mediaType = ext === '.png' ? 'image/png' : 'image/jpeg';
   const imageData = fs.readFileSync(imagePath).toString('base64');
-  console.log(`[DC] Vision: sending ${Math.round(imageData.length*0.75/1024)}KB to Claude…`);
+  console.log(`[DC] Vision: sending ${Math.round(imageData.length * 0.75 / 1024)}KB to Claude...`);
 
   const raw = await callClaude([{
-    role:'user',
-    content:[
-      { type:'image', source:{ type:'base64', media_type:mediaType, data:imageData }},
-      { type:'text',  text: EXTRACTION_PROMPT },
+    role: 'user',
+    content: [
+      { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageData } },
+      { type: 'text',  text: EXTRACTION_PROMPT },
     ]
   }]);
 
-  console.log(`[DC] Vision raw (200 chars): ${raw.slice(0,200)}`);
+  console.log(`[DC] Vision raw (200 chars): ${raw.slice(0, 200)}`);
   return parseJSON(raw);
 }
 
-// ── STEP 2: Cross-verify + OCR ambiguity correction ───────────────────────
-//
-// WHY: Even after Claude Vision extracts text, words can be garbled because
-//   the newspaper image is compressed and small. Examples seen in real output:
-//     "Eagineer"   → "Engineer"      (vowel swap)
-//     "Expenenced" → "Experienced"   (missing letter)
-//     "Fncla"      → "Financial"     (compression artifact)
-//     "Regured"    → "Required"      (transposition)
-//     "Electrca"   → "Electrical"    (dropped vowel)
-//     "muLnipLe"   → "Multiple"      (case corruption)
-//     "Prectech"   → "Pretech / Prakash" (context-guessed)
-//     "CO2683"     → probably a phone/ref number
-//     "abad2020"   → "Hyderabad 2020" (city name OCR error)
-//
-// HOW: Send ads to Claude with explicit instructions to:
-//   1. Treat every word as potentially OCR-corrupted
-//   2. Use surrounding context to infer the intended word
-//   3. Fix silently — don't flag, just correct
-//   4. Drop non-English / non-classified items
-//
+// ── STEP 2: Cross-verify + correct OCR errors using the original image ──────
+// We send the SAME IMAGE alongside the extracted text so Claude can look at
+// the newspaper directly to fix garbled words:
+//   "Kal Eagineer"    → looks at image → "Civil Engineer"
+//   "for Msdie Scho"  → looks at image → "for Middle School"
+//   "OMce Furnd"      → looks at image → "Office Furniture"
+//   "Bonerpaly"       → looks at image → "Bowenpally"
 async function crossVerifyAds(rawAds, dateStr, imagePath) {
   if (!rawAds.length) return [];
 
   const ext       = path.extname(imagePath).toLowerCase();
-  const mediaType = ext==='.png' ? 'image/png' : 'image/jpeg';
+  const mediaType = ext === '.png' ? 'image/png' : 'image/jpeg';
   const imageData = fs.readFileSync(imagePath).toString('base64');
 
-  const BATCH = 15;
+  const BATCH      = 15;
   const allVerified = [];
 
   for (let i = 0; i < rawAds.length; i += BATCH) {
     const batch        = rawAds.slice(i, i + BATCH);
-    const batchNum     = Math.floor(i/BATCH) + 1;
+    const batchNum     = Math.floor(i / BATCH) + 1;
     const totalBatches = Math.ceil(rawAds.length / BATCH);
     console.log(`[DC] Cross-verify batch ${batchNum}/${totalBatches}: ${batch.length} ads...`);
 
@@ -180,17 +170,18 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       JSON.stringify(batch, null, 2),
       ``,
       `CORRECTION RULES (look at image to verify each word):`,
-      `- "Kal Eagineer" -> read image -> correct job title (e.g. "Civil Engineer")`,
-      `- "for Msdie Scho" -> read image -> correct school/institution name`,
+      `- "Kal Eagineer"    -> read image -> correct job title e.g. "Civil Engineer"`,
+      `- "for Msdie Scho"  -> read image -> correct institution name`,
       `- "e- Pancipals, T" -> likely "Experienced Principals, Teachers"`,
-      `- "OMce Furnd" -> likely "Office Furniture"`,
-      `- "Bonerpaly" -> "Bowenpally" (Hyderabad area)`,
-      `- "Expenenced" -> "Experienced"`,
-      `- "Electrca" -> "Electrical"`,
-      `- "Regured" -> "Required"`,
-      `- "Fncla" -> "Financial"`,
-      `- "muLnipLe" -> "Multiple"`,
-      `- Symbols like a section sign or cent sign mixed in words -> remove them`,
+      `- "OMce Furnd"      -> likely "Office Furniture"`,
+      `- "Bonerpaly"       -> "Bowenpally" (Hyderabad area)`,
+      `- "Expenenced"      -> "Experienced"`,
+      `- "Electrca"        -> "Electrical"`,
+      `- "Regured"         -> "Required"`,
+      `- "Fncla"           -> "Financial"`,
+      `- "muLnipLe"        -> "Multiple"`,
+      `- "1 SVK EM"        -> read image -> full company/ad name`,
+      `- Symbols like cent sign or section sign mixed in words -> remove them`,
       `- "0" vs "O", "1" vs "l" -> use image context to decide`,
       ``,
       `DROP these (not real classified ads):`,
@@ -198,6 +189,7 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       `- Section headers alone with no ad body`,
       `- Fragments under 5 meaningful words`,
       `- Mostly non-English (Telugu or Hindi) text`,
+      `- Items where the title is just a phone number or location name`,
       ``,
       `Return ONLY a valid JSON array. Same schema, drop invalid items:`,
       `[{"title":"corrected title","description":"corrected English description",`,
@@ -215,13 +207,13 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       ]
     }], 8192);
 
-    console.log(`[DC] Batch ${batchNum} (150 chars): ${raw.slice(0,150)}`);
+    console.log(`[DC] Batch ${batchNum} (150 chars): ${raw.slice(0, 150)}`);
 
     try {
       const verified = parseJSON(raw);
       console.log(`[DC] Batch ${batchNum}: ${batch.length} in -> ${verified.length} corrected`);
       allVerified.push(...verified);
-    } catch(e) {
+    } catch (e) {
       console.error(`[DC] Batch ${batchNum} parse failed: ${e.message}`);
       allVerified.push(...batch);
     }
@@ -231,7 +223,7 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
   return allVerified;
 }
 
-// ── STEP 3: Build final ad objects ─────────────────────────────────────────
+// ── STEP 3: Build + filter final ad objects ────────────────────────────────
 const HYD_LOCALITIES = [
   'Jubilee Hills','Banjara Hills','Gachibowli','Madhapur','Hitech City','Kondapur',
   'Kukatpally','Miyapur','Ameerpet','Secunderabad','Begumpet','Somajiguda',
@@ -248,7 +240,7 @@ function buildAds(verifiedAds, publishDate) {
 
   function cleanPhone(p) {
     if (!p) return '';
-    const d = String(p).replace(/\D/g,'');
+    const d = String(p).replace(/\D/g, '');
     if (d.length >= 10) {
       const num = d.slice(-10);
       return /^[6-9]\d{9}$/.test(num) ? num : '';
@@ -260,7 +252,7 @@ function buildAds(verifiedAds, publishDate) {
     if (loc && loc.length > 2 && /[a-zA-Z]/.test(loc)) {
       return loc.includes('Hyderabad') ? loc : `${loc.trim()}, Hyderabad`;
     }
-    const l = (desc||'').toLowerCase();
+    const l = (desc || '').toLowerCase();
     for (const place of HYD_LOCALITIES) {
       if (l.includes(place.toLowerCase())) return `${place}, Hyderabad`;
     }
@@ -269,41 +261,43 @@ function buildAds(verifiedAds, publishDate) {
 
   function isEnglish(text) {
     if (!text || text.length < 3) return false;
-    // Count ASCII printable chars vs total chars
-    const ascii = (text.match(/[\x20-\x7E]/g)||[]).length;
+    const ascii = (text.match(/[\x20-\x7E]/g) || []).length;
     return (ascii / text.length) > 0.7;
   }
 
-  // Phone number pattern for title check
-  const PHONE_RE = /^[+\d\s\-().]{7,}$/;
-  // Junk title patterns: just a phone, just a location, just symbols, too short
   function isBadTitle(t) {
     if (!t || t.length < 4) return true;
-    if (PHONE_RE.test(t.replace(/\s/g,''))) return true;  // phone as title
-    if (/^[\W\d]+$/.test(t)) return true;                 // all symbols/digits
-    if (/^(bonerpaly|bowenpally|secunderabad|hyderabad|w between|great in taste)[:\s]*$/i.test(t)) return true;
-    const words = t.trim().split(/\s+/);
-    if (words.length < 2) return true;                    // single word only
+    // Phone number used as title
+    if (/^[\d\s\+\-\(\)\.]{7,}$/.test(t.trim())) return true;
+    // All symbols or digits
+    if (/^[\W\d]+$/.test(t)) return true;
+    // Known junk patterns
+    if (/^(bonerpaly|bowenpally\s*:|secunderabad\s*:|hyderabad\s*:|w between|great in taste|cies \[E)[:\s]*$/i.test(t.trim())) return true;
+    // Single word only (too short to be a real ad title)
+    if (t.trim().split(/\s+/).length < 2) return true;
     return false;
   }
 
   return verifiedAds
-    .filter(a => a && typeof a==='object')
+    .filter(a => a && typeof a === 'object')
     .filter(a => {
-      const txt = `${a.title||''} ${a.description||''}`.trim();
+      const txt = `${a.title || ''} ${a.description || ''}`.trim();
       if (txt.length < 20) return false;
       if (!isEnglish(txt)) return false;
-      if (isBadTitle(a.title||'')) return false;
-      // description must have at least 5 real words
-      const words = (a.description||'').replace(/[^a-zA-Z\s]/g,' ').trim().split(/\s+/).filter(w=>w.length>2);
+      if (isBadTitle(a.title || '')) return false;
+      // Description must have at least 5 real words
+      const words = (a.description || '')
+        .replace(/[^a-zA-Z\s]/g, ' ').trim()
+        .split(/\s+/).filter(w => w.length > 2);
       if (words.length < 5) return false;
       return true;
     })
     .map(a => {
-      // Fix: if title is garbled/fragment, use first sensible sentence from description
-      let title = String(a.title||'').slice(0,120).trim();
+      let title = String(a.title || '').slice(0, 120).trim();
+      // If title is still bad after verification, use first sentence of description
       if (isBadTitle(title)) {
-        const firstSentence = (String(a.description||'').split('.')[0] || '').trim();
+        const firstSentence = (String(a.description || '').split('.')[0] || '').trim();
+        title = firstSentence.slice(0, 120) || title;
       }
       return {
         date_published: today,
@@ -311,10 +305,10 @@ function buildAds(verifiedAds, publishDate) {
         category:       a.category     || 'Other',
         sub_category:   a.sub_category || 'General',
         title,
-        description:    String(a.description ||'').trim(),
-        location:       cleanLocation(a.location||'', a.description||''),
-        price:          a.price    || 'Not mentioned',
-        size_area:      a.size_area|| 'Not mentioned',
+        description:    String(a.description || '').trim(),
+        location:       cleanLocation(a.location || '', a.description || ''),
+        price:          a.price     || 'Not mentioned',
+        size_area:      a.size_area || 'Not mentioned',
         phone:          cleanPhone(a.phone),
         source: 'scraper', newspaper_name: NEWSPAPER,
       };
@@ -323,12 +317,12 @@ function buildAds(verifiedAds, publishDate) {
 
 // ── Save to DB ─────────────────────────────────────────────────────────────
 async function saveAds(ads, publishDate) {
-  if (!ads.length) return { inserted:0, skipped:0 };
+  if (!ads.length) return { inserted: 0, skipped: 0 };
   await db.query(
     `DELETE FROM classified_ads WHERE newspaper_name=? AND source='scraper' AND date_published=?`,
     [NEWSPAPER, isoDate(publishDate)]
   );
-  let inserted=0, skipped=0;
+  let inserted = 0, skipped = 0;
   for (const ad of ads) {
     try {
       const [r] = await db.query(`
@@ -341,26 +335,26 @@ async function saveAds(ads, publishDate) {
         ad.title, ad.description, ad.location, ad.price, ad.size_area,
         ad.phone, '', '', ad.newspaper_name,
       ]);
-      r.affectedRows>0 ? inserted++ : skipped++;
-    } catch(e) { console.error('[DC] Row:', e.message); skipped++; }
+      r.affectedRows > 0 ? inserted++ : skipped++;
+    } catch (e) { console.error('[DC] Row:', e.message); skipped++; }
   }
   return { inserted, skipped };
 }
 
-// ── Get page image from DC viewer ──────────────────────────────────────────
+// ── Get page image from DC viewer via canvas export ────────────────────────
 async function getPageImageFromViewer(page, pgNum, outPath) {
-  console.log(`[DC] Clicking page ${pgNum} in viewer…`);
+  console.log(`[DC] Clicking page ${pgNum} in viewer...`);
   await page.evaluate((n) => {
     const all = [...document.querySelectorAll('*')];
     for (const el of all) {
       const t = el.textContent.trim().toUpperCase();
-      if (t===`CLASSIFIEDS(${n})` || (t.includes('CLASSIFIEDS') && t.includes(`(${n})`))) {
-        (el.closest('a,td,div,li')||el).click(); return;
+      if (t === `CLASSIFIEDS(${n})` || (t.includes('CLASSIFIEDS') && t.includes(`(${n})`))) {
+        (el.closest('a,td,div,li') || el).click(); return;
       }
     }
-    if (typeof __doPostBack==='function') {
-      for (const [t,a] of [['lnk_page_'+n,''],['lnkPage'+n,''],['GridView1','Page$'+n]]) {
-        try { __doPostBack(t,a); return; } catch(_) {}
+    if (typeof __doPostBack === 'function') {
+      for (const [t, a] of [['lnk_page_'+n,''],['lnkPage'+n,''],['GridView1','Page$'+n]]) {
+        try { __doPostBack(t, a); return; } catch (_) {}
       }
     }
   }, pgNum);
@@ -374,29 +368,29 @@ async function getPageImageFromViewer(page, pgNum, outPath) {
     let img = null;
     for (const s of selectors) {
       const el = document.querySelector(s);
-      if (el && el.naturalWidth>400) { img=el; break; }
+      if (el && el.naturalWidth > 400) { img = el; break; }
     }
     if (!img) {
       img = [...document.querySelectorAll('img')]
-        .filter(i=>i.naturalWidth>400 && !i.src.includes('logo') && !i.src.includes('icon'))
-        .sort((a,b)=>b.naturalWidth*b.naturalHeight - a.naturalWidth*a.naturalHeight)[0];
+        .filter(i => i.naturalWidth > 400 && !i.src.includes('logo') && !i.src.includes('icon'))
+        .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0];
     }
     if (!img) return null;
-    console.log('img:', img.id, img.naturalWidth+'×'+img.naturalHeight);
+    console.log('img:', img.id, img.naturalWidth + 'x' + img.naturalHeight);
     try {
-      const c=document.createElement('canvas');
-      c.width=img.naturalWidth; c.height=img.naturalHeight;
-      c.getContext('2d').drawImage(img,0,0);
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
       return c.toDataURL('image/png').split(',')[1];
-    } catch(e) { return '__SRC__'+img.src; }
+    } catch (e) { return '__SRC__' + img.src; }
   });
 
   if (!pngBase64) return false;
   if (pngBase64.startsWith('__SRC__')) {
     await downloadFile(pngBase64.slice(7), outPath);
   } else {
-    fs.writeFileSync(outPath, Buffer.from(pngBase64,'base64'));
-    console.log(`[DC] Canvas: ${(fs.statSync(outPath).size/1024).toFixed(0)}KB PNG`);
+    fs.writeFileSync(outPath, Buffer.from(pngBase64, 'base64'));
+    console.log(`[DC] Canvas export: ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB PNG`);
   }
   return true;
 }
@@ -407,23 +401,28 @@ async function scrapeDate(page, targetDate) {
   const [yyyy,mm,dd] = dateStr.split('-');
   console.log(`\n[DC] ══ ${dateStr} (${dayName(targetDate)}) ══`);
 
-  // Navigate: states.aspx → HYDERABAD
-  await page.goto(STATES_URL, { waitUntil:'networkidle2', timeout:60000 });
+  // Navigate: states.aspx → click HYDERABAD
+  await page.goto(STATES_URL, { waitUntil: 'networkidle2', timeout: 60000 });
   await delay(2000);
   await page.evaluate(() => {
-    const a = [...document.querySelectorAll('a')].find(x=>x.textContent.trim().toUpperCase()==='HYDERABAD');
+    const a = [...document.querySelectorAll('a')]
+      .find(x => x.textContent.trim().toUpperCase() === 'HYDERABAD');
     if (a) a.click();
   });
-  await Promise.race([page.waitForNavigation({waitUntil:'networkidle2',timeout:20000}), delay(20000)]);
+  await Promise.race([
+    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }),
+    delay(20000),
+  ]);
   await delay(3000);
   console.log(`[DC] Viewer: ${page.url()}`);
 
-  // ── Sunday Chronicle tab ─────────────────────────────────────────────────
-  // On Sundays DC shows a "Sunday Chronicle" tab — must click it first.
+  // ── Sunday Chronicle tab ───────────────────────────────────────────────
+  // On Sundays DC shows a "Sunday Chronicle" tab — must click it or we
+  // get the weekday edition instead of Sunday's paper.
   const ist      = toIST(targetDate);
   const isSunday = ist.getDay() === 0;
   if (isSunday) {
-    console.log('[DC] Sunday — clicking Sunday Chronicle tab...');
+    console.log('[DC] Sunday detected — clicking Sunday Chronicle tab...');
     const clicked = await page.evaluate(() => {
       const tab = [...document.querySelectorAll('a,button,li,span,td,div')]
         .find(e => /sunday\s*chronicle/i.test(e.textContent.trim()));
@@ -432,15 +431,18 @@ async function scrapeDate(page, targetDate) {
     });
     console.log(`[DC] Sunday Chronicle tab clicked: ${clicked}`);
     if (clicked) {
-      await Promise.race([page.waitForNavigation({waitUntil:'networkidle2',timeout:15000}), delay(15000)]);
+      await Promise.race([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }),
+        delay(15000),
+      ]);
       await delay(2000);
     }
   }
 
-  // ── Always select the date explicitly ─────────────────────────────────────
-  // BUG FIX: previously skipped when dateStr === todayStr, which caused the
-  // viewer to stay on yesterday. Now always select the date for every scrape.
-  const month = ist.toLocaleDateString('en-US', { month:'short' });
+  // ── Always select the date explicitly ─────────────────────────────────
+  // BUG FIX: previously skipped for today — viewer stayed on yesterday's
+  // paper. Now always select explicitly for every date including today.
+  const month = ist.toLocaleDateString('en-US', { month: 'short' });
   const day   = ist.getDate();
   const year  = ist.getFullYear();
   console.log(`[DC] Selecting date: ${month} ${day}, ${year}...`);
@@ -448,44 +450,48 @@ async function scrapeDate(page, targetDate) {
   const picked = await page.evaluate((m, d, y) => {
     for (const s of document.querySelectorAll('select')) {
       const o = [...s.options].find(x => {
-        const t = x.text.replace(/\s+/g,' ').trim();
+        const t = x.text.replace(/\s+/g, ' ').trim();
         return t.includes(m) && t.includes(String(d)) && t.includes(String(y));
       });
-      if (o) { s.value=o.value; s.dispatchEvent(new Event('change')); return o.text; }
+      if (o) { s.value = o.value; s.dispatchEvent(new Event('change')); return o.text; }
     }
     return null;
   }, month, day, year);
 
   console.log(`[DC] Date selected: ${picked}`);
   if (picked) {
-    await Promise.race([page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15000}), delay(15000)]);
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
+      delay(15000),
+    ]);
     await delay(3000);
   } else {
-    console.log('[DC] Date not found in dropdown — viewer may already be on correct date');
+    console.log('[DC] Date not in dropdown — viewer may already be on correct date');
     await delay(2000);
   }
 
-  // Thumbnails tab
+  // Click Thumbnails tab
   await page.evaluate(() => {
-    const t = [...document.querySelectorAll('a,button,li,span,td')].find(e=>/^thumbnails?$/i.test(e.textContent.trim()));
+    const t = [...document.querySelectorAll('a,button,li,span,td')]
+      .find(e => /^thumbnails?$/i.test(e.textContent.trim()));
     if (t) { t.click(); return; }
-    if (typeof __doPostBack==='function') try{__doPostBack('btn_thumbnails','');}catch(_){}
+    if (typeof __doPostBack === 'function') try { __doPostBack('btn_thumbnails', ''); } catch (_) {}
   });
   await delay(3000);
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(),'dc_'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
 
-  for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE+1]) {
+  for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE + 1]) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.png`);
 
-    // Primary: canvas export from viewer
+    // Primary: canvas export from viewer (gets the actual rendered image)
     let gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
 
-    // Fallback: direct URL
-    if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size<5000) {
-      console.log(`[DC] Falling back to direct URL download…`);
-      const jpgPath = imgPath.replace('.png','.jpg');
+    // Fallback: direct URL download
+    if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
+      console.log(`[DC] Canvas failed — trying direct URL download...`);
+      const jpgPath = imgPath.replace('.png', '.jpg');
       const urls = [
         `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
         `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/HYD${pgNum}.jpg`,
@@ -496,116 +502,127 @@ async function scrapeDate(page, targetDate) {
       for (const url of urls) {
         try {
           await downloadFile(url, jpgPath);
-          if (fs.statSync(jpgPath).size>5000) { gotImage=true; break; }
-          try{fs.unlinkSync(jpgPath);}catch(_){}
-        } catch(e) { console.log(`[DC] ✗ ${e.message.slice(0,50)}`); }
+          if (fs.statSync(jpgPath).size > 5000) { gotImage = true; break; }
+          try { fs.unlinkSync(jpgPath); } catch (_) {}
+        } catch (e) { console.log(`[DC] URL failed: ${e.message.slice(0, 50)}`); }
       }
     }
 
-    if (!gotImage) { console.log(`[DC] Page ${pgNum}: no image`); continue; }
+    if (!gotImage) { console.log(`[DC] Page ${pgNum}: no image found`); continue; }
 
-    const actualPath = fs.existsSync(imgPath) ? imgPath : imgPath.replace('.png','.jpg');
-    console.log(`[DC] Image: ${(fs.statSync(actualPath).size/1024).toFixed(0)}KB`);
+    const actualPath = fs.existsSync(imgPath) ? imgPath : imgPath.replace('.png', '.jpg');
+    console.log(`[DC] Image ready: ${(fs.statSync(actualPath).size / 1024).toFixed(0)}KB`);
 
     try {
-      // STEP 1: Extract ads via Claude Vision
+      // STEP 1: Extract all ads via Claude Vision
       const rawAds = await extractAdsWithVision(actualPath);
       console.log(`[DC] Extracted: ${rawAds.length} raw items`);
 
-      // STEP 2: Cross-verify — English only, real classifieds only, cleaned
+      // STEP 2: Cross-verify with image — fix OCR errors, drop non-ads
       const verifiedAds = await crossVerifyAds(rawAds, dateStr, actualPath);
 
-      // STEP 3: Build final objects
+      // STEP 3: Build + filter final ad objects
       const ads = buildAds(verifiedAds, targetDate);
-      console.log(`[DC] Page ${pgNum}: ${ads.length} verified English ads`);
+      console.log(`[DC] Page ${pgNum}: ${ads.length} verified English classified ads`);
       allAds.push(...ads);
 
-      if (pgNum===CLASSIFIEDS_PAGE && ads.length>10) {
-        console.log(`[DC] Enough ads from page 8 — skipping page 9`);
-        try{fs.unlinkSync(actualPath);}catch(_){} break;
+      // If page 8 has good results, skip page 9
+      if (pgNum === CLASSIFIEDS_PAGE && ads.length > 10) {
+        console.log(`[DC] Page 8 has ${ads.length} ads — skipping page 9`);
+        try { fs.unlinkSync(actualPath); } catch (_) {}
+        break;
       }
-    } catch(e) {
+    } catch (e) {
       console.error(`[DC] Page ${pgNum} failed: ${e.message}`);
     }
-    try{fs.unlinkSync(actualPath);}catch(_){}
+    try { fs.unlinkSync(actualPath); } catch (_) {}
   }
 
-  try{fs.rmSync(tmpDir,{recursive:true,force:true});}catch(_){}
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
 
-  // Deduplicate
+  // Deduplicate by title + phone
   const seen   = new Set();
-  const unique = allAds.filter(ad=>{
-    const k=`${ad.title}|${ad.phone}`;
-    if(seen.has(k))return false; seen.add(k); return true;
+  const unique = allAds.filter(ad => {
+    const k = `${ad.title}|${ad.phone}`;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
   });
-  console.log(`[DC] ${dateStr}: ${unique.length} unique verified English classified ads`);
+  console.log(`[DC] ${dateStr}: ${unique.length} unique verified ads`);
   return unique;
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
 async function scrapeAndSave(dateFrom, dateTo) {
-  const dates=[],start=new Date(dateFrom||new Date()),end=new Date(dateTo||dateFrom||new Date());
-  start.setHours(0,0,0,0); end.setHours(0,0,0,0);
-  for(let d=new Date(start);d<=end;d.setDate(d.getDate()+1)) dates.push(new Date(d));
+  const dates = [];
+  const start = new Date(dateFrom || new Date());
+  const end   = new Date(dateTo   || dateFrom || new Date());
+  start.setHours(0, 0, 0, 0); end.setHours(0, 0, 0, 0);
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) dates.push(new Date(d));
   console.log(`[DC] Dates: ${dates.map(isoDate).join(', ')}`);
 
   const browser = await puppeteer.launch({
-    headless:'new',
-    args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1400,900'],
+    headless: 'new',
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1400,900'],
   });
   const summary = [];
   try {
     const page = await browser.newPage();
-    await page.setViewport({width:1400,height:900});
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-
+    await page.setViewport({ width: 1400, height: 900 });
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    );
     for (const date of dates) {
       try {
         const ads    = await scrapeDate(page, date);
         const result = await saveAds(ads, date);
         console.log(`[DC] ✓ ${isoDate(date)}: inserted=${result.inserted} total=${ads.length}`);
-        summary.push({date:isoDate(date), day:dayName(date), ...result, total:ads.length});
-      } catch(err) {
+        summary.push({ date: isoDate(date), day: dayName(date), ...result, total: ads.length });
+      } catch (err) {
         console.error(`[DC] ✗ ${isoDate(date)}: ${err.message}`);
-        summary.push({date:isoDate(date), error:err.message});
+        summary.push({ date: isoDate(date), error: err.message });
       }
     }
   } finally {
     await browser.close();
-    if (require.main===module) try{await db.end();}catch(_){}
+    if (require.main === module) try { await db.end(); } catch (_) {}
   }
-  console.log('\n[DC] ══ Done ══'); console.table(summary); return summary;
+  console.log('\n[DC] ══ Done ══');
+  console.table(summary);
+  return summary;
 }
 
-// ── Week date helper (IST-aware) ───────────────────────────────────────────
-// Returns the 7 dates for the current week (Mon→today) in IST.
-// Call this from your backend for "Scrape full week" to always include today.
+// ── IST-aware week helper ──────────────────────────────────────────────────
+// Returns dates for Mon → today (IST). Always includes today.
+// Use this in your backend for "Scrape full week" button.
 function getCurrentWeekDatesIST() {
-  const nowIST   = toIST(new Date());
-  const dayOfWeek = nowIST.getDay(); // 0=Sun,1=Mon,...6=Sat
-  // Week starts Monday: offset = dayOfWeek===0 ? 6 : dayOfWeek-1
-  const offset   = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-  const dates    = [];
+  const nowIST    = toIST(new Date());
+  const dayOfWeek = nowIST.getDay(); // 0=Sun, 1=Mon ... 6=Sat
+  const offset    = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // days since Monday
+  const dates     = [];
   for (let i = offset; i >= 0; i--) {
     const d = new Date(nowIST);
     d.setDate(d.getDate() - i);
     dates.push(isoDate(d));
   }
-  return dates; // e.g. ["2026-06-22","2026-06-23",...,"2026-06-28"] for a Sunday
+  return dates;
 }
 
-// ── Scrape full current week (IST) ─────────────────────────────────────────
+// Scrape the full current week Mon → today (IST)
 async function scrapeCurrentWeek() {
-  const dates  = getCurrentWeekDatesIST();
-  const first  = dates[0];
-  const last   = dates[dates.length - 1];
-  console.log(`[DC] Scraping full week (IST): ${first} → ${last} (${dates.length} days)`);
+  const dates = getCurrentWeekDatesIST();
+  const first = dates[0];
+  const last  = dates[dates.length - 1];
+  console.log(`[DC] Scraping week (IST): ${first} to ${last} (${dates.length} days)`);
   return scrapeAndSave(first, last);
 }
 
-if (require.main===module) {
-  const[,,a1,a2]=process.argv;
-  const cmd = a1 === '--week' ? scrapeCurrentWeek() : scrapeAndSave(a1,a2);
-  cmd.then(()=>process.exit(0)).catch(e=>{console.error('[DC] Fatal:',e.message);process.exit(1);});
+// ── CLI ────────────────────────────────────────────────────────────────────
+if (require.main === module) {
+  const [,, a1, a2] = process.argv;
+  const cmd = a1 === '--week' ? scrapeCurrentWeek() : scrapeAndSave(a1, a2);
+  cmd
+    .then(() => process.exit(0))
+    .catch(e => { console.error('[DC] Fatal:', e.message); process.exit(1); });
 }
+
 module.exports = { scrapeAndSave, scrapeCurrentWeek, getCurrentWeekDatesIST, isoDate };
