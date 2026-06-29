@@ -243,6 +243,36 @@ cron.schedule('30 18 * * 6', () => {
   scrapeCurrentWeek().catch(e => console.error('[CRON]', e.message));
 });
 
+// ── GET /test-key — verify ANTHROPIC_API_KEY is valid ─────────────────────
+app.get('/test-key', async (req, res) => {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return res.json({ ok: false, error: 'ANTHROPIC_API_KEY not set', length: 0 });
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         key,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 10,
+        messages:   [{ role: 'user', content: 'Hi' }],
+      }),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      res.json({ ok: true, message: 'API key is valid!', key_length: key.length, key_prefix: key.slice(0, 20) + '...' });
+    } else {
+      res.json({ ok: false, error: data.error?.message || JSON.stringify(data), key_length: key.length, key_prefix: key.slice(0, 20) + '...' });
+    }
+  } catch (e) {
+    res.json({ ok: false, error: e.message, key_length: key.length });
+  }
+});
+
 // ── GET /ads ───────────────────────────────────────────────────────────────
 app.get('/ads', async (req, res) => {
   try {
