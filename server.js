@@ -7,7 +7,8 @@ const cors    = require('cors');
 const cron    = require('node-cron');
 const multer  = require('multer');
 
-const scrapeAndSave   = require('./dc_scraper');
+// ── FIX: destructure named exports from new dc_scraper ────────────────────
+const { scrapeAndSave, scrapeCurrentWeek } = require('./dc_scraper');
 const parsePdfAndSave = require('./pdfParser');
 
 const app = express();
@@ -30,6 +31,14 @@ const db = process.env.MYSQL_URL
     });
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+// ── IST date helper ────────────────────────────────────────────────────────
+// Railway runs UTC. Always use IST for "today" so Sunday/Monday don't get
+// missed when IST is ahead of UTC by 5h30m.
+function todayIST() {
+  return new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000)
+    .toISOString().slice(0, 10);
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function dayName(d) {
@@ -66,14 +75,14 @@ function normalizeSubCategory(category, raw) {
 }
 
 function normalizeAd(row, sno) {
-  const rawCategory = row.category    || row['Category']            || '';
-  const rawSub      = row.sub_category|| row['Sub-Category']        || '';
-  const rawTitle    = row.title       || row['Title/Property Type'] || '';
-  const rawDesc     = row.description || row['Additional Details']  || '';
-  const rawLocation = row.location    || row['Location']            || '';
-  const rawPrice    = row.price       || row['Price/Details']       || '';
-  const rawSize     = row.size_area   || row['Size/Area']           || '';
-  const rawPhone    = row.phone       || row['Contact']             || '';
+  const rawCategory = row.category     || row['Category']            || '';
+  const rawSub      = row.sub_category || row['Sub-Category']        || '';
+  const rawTitle    = row.title        || row['Title/Property Type'] || '';
+  const rawDesc     = row.description  || row['Additional Details']  || '';
+  const rawLocation = row.location     || row['Location']            || '';
+  const rawPrice    = row.price        || row['Price/Details']       || '';
+  const rawSize     = row.size_area    || row['Size/Area']           || '';
+  const rawPhone    = row.phone        || row['Contact']             || '';
 
   const datePublished = toDateValue(row.date_published || row.scraped_at);
   const dayPublished  = row.day_published || dayName(datePublished);
@@ -95,7 +104,7 @@ function normalizeAd(row, sno) {
     email:          row.email    || '',
     source:         row.source   || (row.scraped_at ? 'scraper' : 'seller'),
     status:         row.status   || 'active',
-    scraped_at:     row.scraped_at || null
+    scraped_at:     row.scraped_at || null,
   };
 }
 
@@ -113,18 +122,12 @@ async function initDB(retries = 6, delayMs = 3000) {
         await new Promise(r => setTimeout(r, delayMs));
         delayMs = Math.min(delayMs * 2, 30000);
       } else {
-        console.error('[DB] All retries exhausted. Server will start without a DB connection.');
+        console.error('[DB] All retries exhausted.');
       }
     }
   }
 }
 
-// ── MySQL 5.7-compatible column-adder ─────────────────────────────────────
-// ALTER TABLE … ADD COLUMN IF NOT EXISTS is MySQL 8.0+ only.
-// This helper checks information_schema first, then adds only missing columns.
-
-// Extract DB name from MYSQL_URL (e.g. mysql://user:pass@host:3306/dbname)
-// so information_schema queries work correctly on Railway where DB_NAME may not be set.
 function getDbName() {
   if (process.env.MYSQL_URL) {
     try {
@@ -149,8 +152,6 @@ async function addColumnIfMissing(tableName, columnName, columnDef) {
 }
 
 async function _initDBOnce() {
-  // Only bootstrap CREATE DATABASE when using individual env vars (local dev).
-  // When MYSQL_URL is set (Railway / hosted MySQL), the DB already exists.
   if (!process.env.MYSQL_URL) {
     const bootstrapCfg = {
       host:           process.env.DB_HOST     || 'localhost',
@@ -160,16 +161,13 @@ async function _initDBOnce() {
       connectTimeout: 20000,
     };
     const bootstrap = await mysql.createConnection(bootstrapCfg);
-    const dbName = process.env.DB_NAME || 'newspaper_db';
+    const dbName    = process.env.DB_NAME || 'newspaper_db';
     await bootstrap.query(
       `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
     );
     await bootstrap.end();
   }
 
-  // Step 2: create table — only lowercase canonical columns.
-  // No duplicate backtick-quoted aliases: MySQL is case-insensitive on column names,
-  // so having both `category` and `Category` in the same CREATE TABLE → ER_DUP_FIELDNAME.
   await db.query(`
     CREATE TABLE IF NOT EXISTS classified_ads (
       id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -192,7 +190,6 @@ async function _initDBOnce() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  // Step 3: add any missing columns — works on MySQL 5.7 AND 8.0
   const cols = [
     ['newspaper_name', "VARCHAR(100)  DEFAULT NULL"],
     ['source',         "ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper'"],
@@ -211,17 +208,10 @@ async function _initDBOnce() {
     ['email',          "VARCHAR(120)  DEFAULT NULL"],
     ['scraped_at',     "DATETIME      DEFAULT NULL"],
   ];
-  for (const [col, def] of cols) {
-    await addColumnIfMissing('classified_ads', col, def);
-  }
+  for (const [col, def] of cols) await addColumnIfMissing('classified_ads', col, def);
 
-  // Step 4: indexes — silently ignore if they already exist
-  try {
-    await db.query(`CREATE INDEX idx_newspaper_date ON classified_ads (newspaper_name, date_published)`);
-  } catch (_) {}
-  try {
-    await db.query(`CREATE INDEX idx_day_published ON classified_ads (day_published)`);
-  } catch (_) {}
+  try { await db.query(`CREATE INDEX idx_newspaper_date ON classified_ads (newspaper_name, date_published)`); } catch (_) {}
+  try { await db.query(`CREATE INDEX idx_day_published  ON classified_ads (day_published)`); }               catch (_) {}
 
   await db.query(`UPDATE classified_ads SET newspaper_name = 'Deccan Chronicle' WHERE newspaper_name IS NULL`);
   await db.query(`
@@ -232,24 +222,25 @@ async function _initDBOnce() {
 }
 
 // ── Cron jobs ──────────────────────────────────────────────────────────────
-cron.schedule('0 6 * * *', () => {
-  console.log('[CRON] 6 AM — scraping today');
+// All times are IST (Railway runs UTC, cron times below are in IST offset).
+// 6 AM IST = 0:30 UTC  → cron '30 0 * * *'
+// 12 PM IST = 6:30 UTC → cron '30 6 * * *'
+// Sun midnight IST = 18:30 UTC Sat → cron '30 18 * * 6'
+
+cron.schedule('30 0 * * *', () => {
+  console.log('[CRON] 6:00 AM IST — scraping today');
   scrapeAndSave().catch(e => console.error('[CRON]', e.message));
 });
 
-cron.schedule('0 12 * * *', () => {
-  console.log('[CRON] 12 PM — re-scraping today');
+cron.schedule('30 6 * * *', () => {
+  console.log('[CRON] 12:00 PM IST — re-scraping today');
   scrapeAndSave().catch(e => console.error('[CRON]', e.message));
 });
 
-cron.schedule('0 0 * * 0', () => {
-  const today = new Date();
-  const mon   = new Date(today);
-  mon.setDate(today.getDate() - 6);
-  const monStr = mon.toISOString().slice(0, 10);
-  const todStr = today.toISOString().slice(0, 10);
-  console.log(`[CRON] Sunday midnight — scraping full week ${monStr} → ${todStr}`);
-  scrapeAndSave(monStr, todStr).catch(e => console.error('[CRON]', e.message));
+// ── FIX: Sunday midnight — use scrapeCurrentWeek() which is IST-aware ─────
+cron.schedule('30 18 * * 6', () => {
+  console.log('[CRON] Sunday midnight IST — scraping full week');
+  scrapeCurrentWeek().catch(e => console.error('[CRON]', e.message));
 });
 
 // ── GET /ads ───────────────────────────────────────────────────────────────
@@ -258,7 +249,7 @@ app.get('/ads', async (req, res) => {
     const {
       category, subCategory, source, day, date,
       dateFrom, dateTo, search, sort = 'newest',
-      page = 1, limit: rawLimit = 24
+      page = 1, limit: rawLimit = 24,
     } = req.query;
 
     const limit  = Math.min(Math.max(Number(rawLimit) || 24, 1), 100);
@@ -267,14 +258,13 @@ app.get('/ads', async (req, res) => {
     const cond   = ['newspaper_name = ?'];
     const params = ['Deccan Chronicle'];
 
-    if (category)    { cond.push('LOWER(category) = LOWER(?)'); params.push(category); }
+    if (category)    { cond.push('LOWER(category) = LOWER(?)');     params.push(category); }
     if (subCategory) { cond.push('LOWER(sub_category) = LOWER(?)'); params.push(subCategory); }
-    if (source)      { cond.push('source = ?');                                               params.push(source); }
-    if (day)         { cond.push('DAYNAME(date_published) = ?');                              params.push(day); }
-    if (date)        { cond.push('date_published = ?');                                       params.push(date); }
-    if (dateFrom)    { cond.push('date_published >= ?');                                      params.push(dateFrom); }
-    if (dateTo)      { cond.push('date_published <= ?');                                      params.push(dateTo); }
-
+    if (source)      { cond.push('source = ?');                      params.push(source); }
+    if (day)         { cond.push('DAYNAME(date_published) = ?');     params.push(day); }
+    if (date)        { cond.push('date_published = ?');              params.push(date); }
+    if (dateFrom)    { cond.push('date_published >= ?');             params.push(dateFrom); }
+    if (dateTo)      { cond.push('date_published <= ?');             params.push(dateTo); }
 
     if (search) {
       const t = `%${search}%`;
@@ -296,7 +286,9 @@ app.get('/ads', async (req, res) => {
     };
     const orderBy = orderMap[sort] || 'date_published DESC, scraped_at DESC';
 
-    const [[{ total }]] = await db.query(`SELECT COUNT(*) AS total FROM classified_ads ${where}`, params);
+    const [[{ total }]] = await db.query(
+      `SELECT COUNT(*) AS total FROM classified_ads ${where}`, params
+    );
     const [rows] = await db.query(`
       SELECT
         id, category, sub_category, title, description,
@@ -344,7 +336,7 @@ app.post('/ads', async (req, res) => {
     if (!category || !title || !phone) {
       return res.status(400).json({ error: 'category, title, and phone are required' });
     }
-    const today  = new Date().toISOString().slice(0, 10);
+    const today  = todayIST();
     const dayPub = dayName(new Date());
     const [result] = await db.query(`
       INSERT INTO classified_ads
@@ -355,7 +347,7 @@ app.post('/ads', async (req, res) => {
     `, [
       today, dayPub, category, subCategory || 'General', title,
       description || '', location || '', price || 'Not mentioned',
-      sizeArea || 'Not mentioned', phone, whatsapp || '', email || ''
+      sizeArea || 'Not mentioned', phone, whatsapp || '', email || '',
     ]);
     res.json({ success: true, id: result.insertId });
   } catch (err) {
@@ -370,13 +362,13 @@ app.get('/days', async (req, res) => {
     const [rows] = await db.query(`
       SELECT
         date_published,
-        DAYNAME(date_published)  AS day_name,
+        DAYNAME(date_published)              AS day_name,
         DATE_FORMAT(date_published, '%a, %d %b') AS label,
-        COUNT(*)                 AS ad_count,
-        SUM(category = 'Property')    AS property_count,
-        SUM(category = 'Jobs')        AS jobs_count,
-        SUM(category = 'Matrimonial') AS matrimonial_count,
-        SUM(category = 'Automotive')  AS automotive_count
+        COUNT(*)                             AS ad_count,
+        SUM(category = 'Property')           AS property_count,
+        SUM(category = 'Jobs')               AS jobs_count,
+        SUM(category = 'Matrimonial')        AS matrimonial_count,
+        SUM(category = 'Automotive')         AS automotive_count
       FROM classified_ads
       WHERE newspaper_name = 'Deccan Chronicle'
         AND date_published IS NOT NULL
@@ -414,8 +406,9 @@ app.get('/stats', async (req, res) => {
 });
 
 // ── GET /scrape ────────────────────────────────────────────────────────────
+// FIX: uses IST today, no longer passes UTC date
 app.get('/scrape', async (req, res) => {
-  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const date = req.query.date || todayIST();
   res.json({ message: `Scraping ${date}…`, status: 'started' });
   scrapeAndSave(date, date)
     .then(r => console.log('[SCRAPE]', r))
@@ -423,14 +416,10 @@ app.get('/scrape', async (req, res) => {
 });
 
 // ── GET /scrape/week ───────────────────────────────────────────────────────
+// FIX: uses scrapeCurrentWeek() — always Mon→today in IST, includes Sunday
 app.get('/scrape/week', async (req, res) => {
-  const today = new Date();
-  const mon   = new Date(today);
-  mon.setDate(today.getDate() - today.getDay() + 1);
-  const monStr = mon.toISOString().slice(0, 10);
-  const todStr = today.toISOString().slice(0, 10);
-  res.json({ message: `Scraping full week ${monStr} → ${todStr}`, status: 'started' });
-  scrapeAndSave(monStr, todStr)
+  res.json({ message: 'Scraping full week (Mon → today IST)…', status: 'started' });
+  scrapeCurrentWeek()
     .then(r => console.log('[SCRAPE/WEEK]', r))
     .catch(e => console.error('[SCRAPE/WEEK]', e.message));
 });
@@ -453,9 +442,6 @@ function startServer(port) {
   });
 }
 
-// Start server immediately so Railway's health-check doesn't time out,
-// then run DB init (with retries) in the background.
 startServer(Number(process.env.PORT) || 8080);
 initDB().catch(e => console.error('[DB] Fatal after all retries:', e.code, e.message));
-
 
