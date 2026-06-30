@@ -1,6 +1,5 @@
-
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
-// Uses Gemini Vision API (free tier) for image extraction
+// Uses Groq Vision API (free tier) for image extraction
 require('dotenv').config();
 const puppeteer = require('puppeteer');
 const mysql     = require('mysql2/promise');
@@ -60,51 +59,45 @@ function downloadFile(url, dest) {
   });
 }
 
-// ── Gemini API ─────────────────────────────────────────────────────────────
-async function callGemini(imagePath, prompt) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set in .env file');
+// ── Groq API ───────────────────────────────────────────────────────────────
+async function callGroq(imagePath, prompt) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not set in .env file');
 
   const ext       = path.extname(imagePath).toLowerCase();
   const mimeType  = ext === '.png' ? 'image/png' : 'image/jpeg';
   const imageData = fs.readFileSync(imagePath).toString('base64');
 
-  console.log(`[DC] Gemini: sending ${Math.round(imageData.length * 0.75 / 1024)}KB image...`);
+  console.log(`[DC] Groq: sending ${Math.round(imageData.length * 0.75 / 1024)}KB image...`);
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
-  const body = {
-    contents: [{
-      parts: [
-        {
-          inline_data: {
-            mime_type: mimeType,
-            data: imageData,
-          }
-        },
-        { text: prompt }
-      ]
-    }],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 8192,
-    }
-  };
-
-  const resp = await fetch(url, {
+  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageData}` } },
+        ]
+      }],
+      temperature: 0.1,
+      max_tokens: 8192,
+    }),
   });
 
   if (!resp.ok) {
     const err = await resp.text();
-    throw new Error(`Gemini API ${resp.status}: ${err.slice(0, 300)}`);
+    throw new Error(`Groq API ${resp.status}: ${err.slice(0, 300)}`);
   }
 
   const data = await resp.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  if (!text) throw new Error('Gemini returned empty response');
+  const text = data.choices?.[0]?.message?.content || '';
+  if (!text) throw new Error('Groq returned empty response');
   return text;
 }
 
@@ -147,8 +140,8 @@ Category guide:
 - Other: furniture/finance/lost/notice/poultry/building materials`;
 
 async function extractAdsWithVision(imagePath) {
-  const raw = await callGemini(imagePath, EXTRACTION_PROMPT);
-  console.log(`[DC] Gemini raw (200 chars): ${raw.slice(0, 200)}`);
+  const raw = await callGroq(imagePath, EXTRACTION_PROMPT);
+  console.log(`[DC] Groq raw (200 chars): ${raw.slice(0, 200)}`);
   return parseJSON(raw);
 }
 
@@ -198,7 +191,7 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
     ].join('\n');
 
     try {
-      const raw      = await callGemini(imagePath, verifyPrompt);
+      const raw      = await callGroq(imagePath, verifyPrompt);
       console.log(`[DC] Batch ${batchNum} (150 chars): ${raw.slice(0, 150)}`);
       const verified = parseJSON(raw);
       console.log(`[DC] Batch ${batchNum}: ${batch.length} in -> ${verified.length} corrected`);
