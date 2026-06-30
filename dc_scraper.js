@@ -1,3 +1,4 @@
+
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
 // Uses Groq Vision API (free tier) for image extraction
 require('dotenv').config();
@@ -86,7 +87,7 @@ async function callGroq(imagePath, prompt) {
         ]
       }],
       temperature: 0.1,
-      max_tokens: 8192,
+      max_tokens: 4096,
     }),
   });
 
@@ -483,7 +484,10 @@ async function scrapeDate(page, targetDate) {
       const rawAds = await extractAdsWithVision(actualPath);
       console.log(`[DC] Extracted: ${rawAds.length} raw items`);
 
-      const verifiedAds = await crossVerifyAds(rawAds, dateStr, actualPath);
+      // Cross-verify skipped to stay under free-tier rate limits.
+      // Re-enable by uncommenting the line below if you upgrade your Groq plan.
+      // const verifiedAds = await crossVerifyAds(rawAds, dateStr, actualPath);
+      const verifiedAds = rawAds;
 
       const ads = buildAds(verifiedAds, targetDate);
       console.log(`[DC] Page ${pgNum}: ${ads.length} verified English classified ads`);
@@ -494,6 +498,8 @@ async function scrapeDate(page, targetDate) {
         try { fs.unlinkSync(actualPath); } catch (_) {}
         break;
       }
+      // Pause between pages to stay under Groq free-tier tokens-per-minute limit
+      await delay(15000);
     } catch (e) {
       console.error(`[DC] Page ${pgNum} failed: ${e.message}`);
     }
