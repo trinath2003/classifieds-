@@ -1,4 +1,3 @@
-
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
 // Uses Groq Vision API (free tier) for image extraction
 require('dotenv').config();
@@ -140,7 +139,31 @@ Category guide:
 - Matrimonial: bride/groom/alliance/matrimonial/match
 - Other: furniture/finance/lost/notice/poultry/building materials`;
 
+// ── DIAGNOSTIC: confirm the model can actually read the page ───────────────
+// Runs every time before real extraction. Logs what the model sees —
+// page date, headline text, whether it looks like classifieds — so we can
+// tell "model is blind" apart from "this page genuinely has no ads yet".
+const DIAGNOSTIC_PROMPT = `Look at this newspaper page image carefully.
+
+Answer ONLY in this exact plain-text format, one line each, no markdown:
+DATE_VISIBLE: <any date you can read on the page, or "none visible">
+PAGE_TYPE: <classifieds | news | sports | other>
+SAMPLE_TEXT: <copy the first 1-2 lines of readable English text you see, or "none readable">
+LOOKS_LIKE_ADS: <yes | no>`;
+
+async function diagnosticCheck(imagePath) {
+  try {
+    const raw = await callGroq(imagePath, DIAGNOSTIC_PROMPT);
+    console.log(`[DC] ── DIAGNOSTIC ──`);
+    console.log(raw.trim());
+    console.log(`[DC] ── END DIAGNOSTIC ──`);
+  } catch (e) {
+    console.log(`[DC] DIAGNOSTIC FAILED: ${e.message}`);
+  }
+}
+
 async function extractAdsWithVision(imagePath) {
+  await diagnosticCheck(imagePath);
   const raw = await callGroq(imagePath, EXTRACTION_PROMPT);
   console.log(`[DC] Groq raw (200 chars): ${raw.slice(0, 200)}`);
   return parseJSON(raw);
