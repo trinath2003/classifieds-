@@ -1,5 +1,6 @@
+
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
-// Uses Claude Vision API + cross-verification with image reference
+// Uses Gemini Vision API (free tier) for image extraction
 require('dotenv').config();
 const puppeteer = require('puppeteer');
 const mysql     = require('mysql2/promise');
@@ -59,27 +60,52 @@ function downloadFile(url, dest) {
   });
 }
 
-// ── Claude API ─────────────────────────────────────────────────────────────
-async function callClaude(messages, maxTokens = 8192) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
+// ── Gemini API ─────────────────────────────────────────────────────────────
+async function callGemini(imagePath, prompt) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set in .env file');
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+  const ext       = path.extname(imagePath).toLowerCase();
+  const mimeType  = ext === '.png' ? 'image/png' : 'image/jpeg';
+  const imageData = fs.readFileSync(imagePath).toString('base64');
+
+  console.log(`[DC] Gemini: sending ${Math.round(imageData.length * 0.75 / 1024)}KB image...`);
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+
+  const body = {
+    contents: [{
+      parts: [
+        {
+          inline_data: {
+            mime_type: mimeType,
+            data: imageData,
+          }
+        },
+        { text: prompt }
+      ]
+    }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 8192,
+    }
+  };
+
+  const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type':      'application/json',
-      'x-api-key':         apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({ model: 'claude-opus-4-6', max_tokens: maxTokens, messages }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
     const err = await resp.text();
-    throw new Error(`Claude API ${resp.status}: ${err.slice(0, 200)}`);
+    throw new Error(`Gemini API ${resp.status}: ${err.slice(0, 300)}`);
   }
+
   const data = await resp.json();
-  return data.content?.[0]?.text || '';
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  if (!text) throw new Error('Gemini returned empty response');
+  return text;
 }
 
 function parseJSON(raw) {
@@ -87,11 +113,11 @@ function parseJSON(raw) {
   try { return JSON.parse(clean); } catch (_) {
     const m = clean.match(/\[[\s\S]*\]/);
     if (m) return JSON.parse(m[0]);
-    throw new Error('JSON parse failed');
+    throw new Error('JSON parse failed: ' + clean.slice(0, 100));
   }
 }
 
-// ── STEP 1: Extract ads from image using Claude Vision ─────────────────────
+// ── STEP 1: Extract ads from image using Gemini Vision ────────────────────
 const EXTRACTION_PROMPT = `This is the CLASSIFIEDS page from Deccan Chronicle newspaper, Hyderabad edition.
 
 Extract EVERY classified advertisement visible on this page.
@@ -121,38 +147,16 @@ Category guide:
 - Other: furniture/finance/lost/notice/poultry/building materials`;
 
 async function extractAdsWithVision(imagePath) {
-  const ext       = path.extname(imagePath).toLowerCase();
-  const mediaType = ext === '.png' ? 'image/png' : 'image/jpeg';
-  const imageData = fs.readFileSync(imagePath).toString('base64');
-  console.log(`[DC] Vision: sending ${Math.round(imageData.length * 0.75 / 1024)}KB to Claude...`);
-
-  const raw = await callClaude([{
-    role: 'user',
-    content: [
-      { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageData } },
-      { type: 'text',  text: EXTRACTION_PROMPT },
-    ]
-  }]);
-
-  console.log(`[DC] Vision raw (200 chars): ${raw.slice(0, 200)}`);
+  const raw = await callGemini(imagePath, EXTRACTION_PROMPT);
+  console.log(`[DC] Gemini raw (200 chars): ${raw.slice(0, 200)}`);
   return parseJSON(raw);
 }
 
-// ── STEP 2: Cross-verify + correct OCR errors using the original image ──────
-// We send the SAME IMAGE alongside the extracted text so Claude can look at
-// the newspaper directly to fix garbled words:
-//   "Kal Eagineer"    → looks at image → "Civil Engineer"
-//   "for Msdie Scho"  → looks at image → "for Middle School"
-//   "OMce Furnd"      → looks at image → "Office Furniture"
-//   "Bonerpaly"       → looks at image → "Bowenpally"
+// ── STEP 2: Cross-verify + correct OCR errors using the original image ─────
 async function crossVerifyAds(rawAds, dateStr, imagePath) {
   if (!rawAds.length) return [];
 
-  const ext       = path.extname(imagePath).toLowerCase();
-  const mediaType = ext === '.png' ? 'image/png' : 'image/jpeg';
-  const imageData = fs.readFileSync(imagePath).toString('base64');
-
-  const BATCH      = 15;
+  const BATCH       = 15;
   const allVerified = [];
 
   for (let i = 0; i < rawAds.length; i += BATCH) {
@@ -170,22 +174,16 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       JSON.stringify(batch, null, 2),
       ``,
       `CORRECTION RULES (look at image to verify each word):`,
-      `- "Kal Eagineer"    -> read image -> correct job title e.g. "Civil Engineer"`,
-      `- "for Msdie Scho"  -> read image -> correct institution name`,
-      `- "e- Pancipals, T" -> likely "Experienced Principals, Teachers"`,
-      `- "OMce Furnd"      -> likely "Office Furniture"`,
-      `- "Bonerpaly"       -> "Bowenpally" (Hyderabad area)`,
-      `- "Expenenced"      -> "Experienced"`,
-      `- "Electrca"        -> "Electrical"`,
-      `- "Regured"         -> "Required"`,
-      `- "Fncla"           -> "Financial"`,
-      `- "muLnipLe"        -> "Multiple"`,
-      `- "1 SVK EM"        -> read image -> full company/ad name`,
+      `- Fix garbled job titles, location names, company names by reading the image`,
+      `- "Bonerpaly" -> "Bowenpally" (Hyderabad area)`,
+      `- "Expenenced" -> "Experienced"`,
+      `- "Electrca" -> "Electrical"`,
+      `- "Regured" -> "Required"`,
       `- Symbols like cent sign or section sign mixed in words -> remove them`,
       `- "0" vs "O", "1" vs "l" -> use image context to decide`,
       ``,
       `DROP these (not real classified ads):`,
-      `- News headlines like "Turncoats likely to get" or "AAP and Shiv Sena"`,
+      `- News headlines`,
       `- Section headers alone with no ad body`,
       `- Fragments under 5 meaningful words`,
       `- Mostly non-English (Telugu or Hindi) text`,
@@ -199,17 +197,9 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|General"}]`,
     ].join('\n');
 
-    const raw = await callClaude([{
-      role: 'user',
-      content: [
-        { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageData } },
-        { type: 'text',  text: verifyPrompt },
-      ]
-    }], 8192);
-
-    console.log(`[DC] Batch ${batchNum} (150 chars): ${raw.slice(0, 150)}`);
-
     try {
+      const raw      = await callGemini(imagePath, verifyPrompt);
+      console.log(`[DC] Batch ${batchNum} (150 chars): ${raw.slice(0, 150)}`);
       const verified = parseJSON(raw);
       console.log(`[DC] Batch ${batchNum}: ${batch.length} in -> ${verified.length} corrected`);
       allVerified.push(...verified);
@@ -267,13 +257,9 @@ function buildAds(verifiedAds, publishDate) {
 
   function isBadTitle(t) {
     if (!t || t.length < 4) return true;
-    // Phone number used as title
     if (/^[\d\s\+\-\(\)\.]{7,}$/.test(t.trim())) return true;
-    // All symbols or digits
     if (/^[\W\d]+$/.test(t)) return true;
-    // Known junk patterns
-    if (/^(bonerpaly|bowenpally\s*:|secunderabad\s*:|hyderabad\s*:|w between|great in taste|cies \[E)[:\s]*$/i.test(t.trim())) return true;
-    // Single word only (too short to be a real ad title)
+    if (/^(bonerpaly|bowenpally\s*:|secunderabad\s*:|hyderabad\s*:)[:\s]*$/i.test(t.trim())) return true;
     if (t.trim().split(/\s+/).length < 2) return true;
     return false;
   }
@@ -285,7 +271,6 @@ function buildAds(verifiedAds, publishDate) {
       if (txt.length < 20) return false;
       if (!isEnglish(txt)) return false;
       if (isBadTitle(a.title || '')) return false;
-      // Description must have at least 5 real words
       const words = (a.description || '')
         .replace(/[^a-zA-Z\s]/g, ' ').trim()
         .split(/\s+/).filter(w => w.length > 2);
@@ -294,7 +279,6 @@ function buildAds(verifiedAds, publishDate) {
     })
     .map(a => {
       let title = String(a.title || '').slice(0, 120).trim();
-      // If title is still bad after verification, use first sentence of description
       if (isBadTitle(title)) {
         const firstSentence = (String(a.description || '').split('.')[0] || '').trim();
         title = firstSentence.slice(0, 120) || title;
@@ -401,7 +385,6 @@ async function scrapeDate(page, targetDate) {
   const [yyyy,mm,dd] = dateStr.split('-');
   console.log(`\n[DC] ══ ${dateStr} (${dayName(targetDate)}) ══`);
 
-  // Navigate: states.aspx → click HYDERABAD
   await page.goto(STATES_URL, { waitUntil: 'networkidle2', timeout: 60000 });
   await delay(2000);
   await page.evaluate(() => {
@@ -416,9 +399,6 @@ async function scrapeDate(page, targetDate) {
   await delay(3000);
   console.log(`[DC] Viewer: ${page.url()}`);
 
-  // ── Sunday Chronicle tab ───────────────────────────────────────────────
-  // On Sundays DC shows a "Sunday Chronicle" tab — must click it or we
-  // get the weekday edition instead of Sunday's paper.
   const ist      = toIST(targetDate);
   const isSunday = ist.getDay() === 0;
   if (isSunday) {
@@ -429,7 +409,6 @@ async function scrapeDate(page, targetDate) {
       if (tab) { tab.click(); return true; }
       return false;
     });
-    console.log(`[DC] Sunday Chronicle tab clicked: ${clicked}`);
     if (clicked) {
       await Promise.race([
         page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }),
@@ -439,9 +418,6 @@ async function scrapeDate(page, targetDate) {
     }
   }
 
-  // ── Always select the date explicitly ─────────────────────────────────
-  // BUG FIX: previously skipped for today — viewer stayed on yesterday's
-  // paper. Now always select explicitly for every date including today.
   const month = ist.toLocaleDateString('en-US', { month: 'short' });
   const day   = ist.getDate();
   const year  = ist.getFullYear();
@@ -470,7 +446,6 @@ async function scrapeDate(page, targetDate) {
     await delay(2000);
   }
 
-  // Click Thumbnails tab
   await page.evaluate(() => {
     const t = [...document.querySelectorAll('a,button,li,span,td')]
       .find(e => /^thumbnails?$/i.test(e.textContent.trim()));
@@ -485,10 +460,8 @@ async function scrapeDate(page, targetDate) {
   for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE + 1]) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.png`);
 
-    // Primary: canvas export from viewer (gets the actual rendered image)
     let gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
 
-    // Fallback: direct URL download
     if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
       console.log(`[DC] Canvas failed — trying direct URL download...`);
       const jpgPath = imgPath.replace('.png', '.jpg');
@@ -514,19 +487,15 @@ async function scrapeDate(page, targetDate) {
     console.log(`[DC] Image ready: ${(fs.statSync(actualPath).size / 1024).toFixed(0)}KB`);
 
     try {
-      // STEP 1: Extract all ads via Claude Vision
       const rawAds = await extractAdsWithVision(actualPath);
       console.log(`[DC] Extracted: ${rawAds.length} raw items`);
 
-      // STEP 2: Cross-verify with image — fix OCR errors, drop non-ads
       const verifiedAds = await crossVerifyAds(rawAds, dateStr, actualPath);
 
-      // STEP 3: Build + filter final ad objects
       const ads = buildAds(verifiedAds, targetDate);
       console.log(`[DC] Page ${pgNum}: ${ads.length} verified English classified ads`);
       allAds.push(...ads);
 
-      // If page 8 has good results, skip page 9
       if (pgNum === CLASSIFIEDS_PAGE && ads.length > 10) {
         console.log(`[DC] Page 8 has ${ads.length} ads — skipping page 9`);
         try { fs.unlinkSync(actualPath); } catch (_) {}
@@ -540,7 +509,6 @@ async function scrapeDate(page, targetDate) {
 
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
 
-  // Deduplicate by title + phone
   const seen   = new Set();
   const unique = allAds.filter(ad => {
     const k = `${ad.title}|${ad.phone}`;
@@ -592,12 +560,10 @@ async function scrapeAndSave(dateFrom, dateTo) {
 }
 
 // ── IST-aware week helper ──────────────────────────────────────────────────
-// Returns dates for Mon → today (IST). Always includes today.
-// Use this in your backend for "Scrape full week" button.
 function getCurrentWeekDatesIST() {
   const nowIST    = toIST(new Date());
-  const dayOfWeek = nowIST.getDay(); // 0=Sun, 1=Mon ... 6=Sat
-  const offset    = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // days since Monday
+  const dayOfWeek = nowIST.getDay();
+  const offset    = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   const dates     = [];
   for (let i = offset; i >= 0; i--) {
     const d = new Date(nowIST);
@@ -607,7 +573,6 @@ function getCurrentWeekDatesIST() {
   return dates;
 }
 
-// Scrape the full current week Mon → today (IST)
 async function scrapeCurrentWeek() {
   const dates = getCurrentWeekDatesIST();
   const first = dates[0];
