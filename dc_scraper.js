@@ -110,46 +110,52 @@ function parseJSON(raw) {
   }
 }
 
-// ── STEP 1: Extract ads from image using Gemini Vision ────────────────────
-const EXTRACTION_PROMPT = `This is the CLASSIFIEDS page from Deccan Chronicle newspaper, Hyderabad edition.
+// ── STEP 1: Extract ads from image using Groq Vision ─────────────────────
+const EXTRACTION_PROMPT = `This is page 2 (CITY page) of Deccan Chronicle newspaper, Hyderabad edition.
 
-Extract EVERY classified advertisement visible on this page.
+This page has BOTH news articles AND a small CLASSIFIEDS section (usually bottom-left corner).
+The classifieds section is labeled "CLASSIFIEDS" and contains small ads under headers like:
+FOR SALE PROPERTY, TEACHERS, FINANCE, SITUATION VACANT, POULTRY, NOTICE, RENTALS, HOTELS, PLOTS, FLATS, COMMERCIAL, BUSINESS OFFER, CHANGE OF NAME etc.
 
-IMPORTANT RULES:
-- Only extract CLASSIFIED ADS — not news headlines, not editorial content, not article text
-- Only extract text that is in ENGLISH — skip any Telugu or Hindi script text entirely
-- A classified ad has: a heading, description text, and usually a contact number
-- Section headers like "FOR SALE PROPERTY", "MULTIPLE VACANCIES", "MATRIMONIAL", "LEASE", "RENTALS" tell you the category
+Your job: Extract ONLY the small classified ads from the CLASSIFIEDS section.
+IGNORE all news articles, headlines, and editorial content.
+
+A classified ad looks like:
+- Small text, tightly packed
+- Has a bold heading or category
+- Usually has a phone number like 040-XXXXXXXX or 9XXXXXXXXX
+- Short description (1-5 lines)
 
 Return ONLY a valid JSON array (no markdown, no explanation):
 [{
   "title": "heading or first meaningful line of the ad",
   "description": "complete ad text exactly as printed in English",
-  "phone": "10-digit mobile number or empty string",
-  "price": "price like Rs.45 L or Rs.2.5 Cr or Not mentioned",
+  "phone": "10-digit mobile or STD number or empty string",
+  "price": "price if mentioned or Not mentioned",
   "location": "locality/area name in Hyderabad or empty string",
   "category": "Property | Jobs | Automotive | Matrimonial | Other",
   "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | General"
 }]
 
 Category guide:
-- Property: flat/house/plot/land/villa/shop/commercial/farm/BHK/lease/rent/PG/hostel
-- Jobs: vacancy/vacancies/required/wanted/hiring/engineer/teacher/accountant/security/sales
+- Property: flat/house/plot/land/villa/shop/commercial/farm/BHK/lease/rent/PG/hostel/hotels
+- Jobs: vacancy/vacancies/required/wanted/hiring/teacher/accountant/security/sales/situation vacant
 - Automotive: car/bike/vehicle/two-wheeler/four-wheeler/SUV
 - Matrimonial: bride/groom/alliance/matrimonial/match
-- Other: furniture/finance/lost/notice/poultry/building materials`;
+- Other: furniture/finance/lost/notice/poultry/building materials/change of name/business offer`;
 
 // ── DIAGNOSTIC: confirm the model can actually read the page ───────────────
 // Runs every time before real extraction. Logs what the model sees —
 // page date, headline text, whether it looks like classifieds — so we can
 // tell "model is blind" apart from "this page genuinely has no ads yet".
-const DIAGNOSTIC_PROMPT = `Look at this newspaper page image carefully.
+const DIAGNOSTIC_PROMPT = `Look at this newspaper page image carefully. This is the CITY page of Deccan Chronicle.
 
 Answer ONLY in this exact plain-text format, one line each, no markdown:
 DATE_VISIBLE: <any date you can read on the page, or "none visible">
-PAGE_TYPE: <classifieds | news | sports | other>
-SAMPLE_TEXT: <copy the first 1-2 lines of readable English text you see, or "none readable">
-LOOKS_LIKE_ADS: <yes | no>`;
+PAGE_NUMBER: <page number visible on the page, or "none visible">
+CLASSIFIEDS_SECTION_VISIBLE: <yes | no — look for a section labeled CLASSIFIEDS in bottom-left>
+SAMPLE_CLASSIFIED_TEXT: <copy first few words of any classified ad you see, or "none found">
+NEWS_HEADLINES: <copy first headline you see>`;
 
 async function diagnosticCheck(imagePath) {
   try {
