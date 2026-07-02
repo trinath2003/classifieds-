@@ -348,24 +348,44 @@ async function saveAds(ads, publishDate) {
   return { inserted, skipped };
 }
 
-// ── Get page image from DC viewer via canvas export ────────────────────────
-async function getPageImageFromViewer(page, pgNum, outPath) {
-  console.log(`[DC] Clicking page ${pgNum} in viewer...`);
-  await page.evaluate((n) => {
+// ── Get CITY page number dynamically from thumbnail strip ──────────────────
+async function getCityPageNum(page) {
+  const pgNum = await page.evaluate(() => {
     const all = [...document.querySelectorAll('*')];
     for (const el of all) {
       const t = el.textContent.trim().toUpperCase();
-      if (t === `CLASSIFIEDS(${n})` || (t.includes('CLASSIFIEDS') && t.includes(`(${n})`))) {
+      // Match labels like CITY(5), CITY(6), CITY(7) — take the first one
+      const match = t.match(/^CITY\((\d+)\)$/);
+      if (match) return parseInt(match[1]);
+    }
+    return null;
+  });
+  console.log(`[DC] CITY page detected: ${pgNum}`);
+  return pgNum;
+}
+async function getPageImageFromViewer(page, pgNum, outPath) {
+  console.log(`[DC] Clicking page ${pgNum} in viewer...`);
+  await page.evaluate((n) => {
+    // Try clicking by page number label first (most reliable)
+    const all = [...document.querySelectorAll('*')];
+
+    // Look for thumbnail labels like "CITY(5)", "POLITICS(2)", "MAIN(1)" etc.
+    for (const el of all) {
+      const t = el.textContent.trim().toUpperCase();
+      const match = t.match(/^[A-Z]+\((\d+)\)$/);
+      if (match && parseInt(match[1]) === n) {
         (el.closest('a,td,div,li') || el).click(); return;
       }
     }
+
+    // Fallback: try __doPostBack
     if (typeof __doPostBack === 'function') {
       for (const [t, a] of [['lnk_page_'+n,''],['lnkPage'+n,''],['GridView1','Page$'+n]]) {
         try { __doPostBack(t, a); return; } catch (_) {}
       }
     }
   }, pgNum);
-  await delay(5000);
+  await delay(8000); // wait longer for page image to fully render
 
   const pngBase64 = await page.evaluate(() => {
     const selectors = [
@@ -460,13 +480,13 @@ async function scrapeDate(page, targetDate) {
   console.log(`[DC] Date selected: ${picked}`);
   if (picked) {
     await Promise.race([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
-      delay(15000),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }),
+      delay(20000),
     ]);
-    await delay(3000);
+    await delay(5000); // extra wait for image to fully load after date change
   } else {
     console.log('[DC] Date not in dropdown — viewer may already be on correct date');
-    await delay(2000);
+    await delay(3000);
   }
 
   await page.evaluate(() => {
@@ -477,10 +497,18 @@ async function scrapeDate(page, targetDate) {
   });
   await delay(3000);
 
+  // Dynamically find the CITY page — classifieds are always in the CITY section
+  const cityPage = await getCityPageNum(page);
+  if (!cityPage) {
+    console.log(`[DC] Could not find CITY page in thumbnail strip — falling back to page ${CLASSIFIEDS_PAGE}`);
+  }
+  const startPage = cityPage || CLASSIFIEDS_PAGE;
+  console.log(`[DC] Will scrape pages: ${startPage}, ${startPage + 1}`);
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
 
-  for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE + 1, CLASSIFIEDS_PAGE + 2]) {
+  for (const pgNum of [startPage, startPage + 1]) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.png`);
     const jpgPath = imgPath.replace('.png', '.jpg');
 
