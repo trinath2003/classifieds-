@@ -482,31 +482,39 @@ async function scrapeDate(page, targetDate) {
 
   for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE + 1, CLASSIFIEDS_PAGE + 2]) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.png`);
+    const jpgPath = imgPath.replace('.png', '.jpg');
 
-    let gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
+    // ── PRIMARY: direct URL download (date-accurate, bypasses viewer quirks) ─
+    const urls = [
+      `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
+      `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/HYD${pgNum}.jpg`,
+      `http://epaper.deccanchronicle.com/PageImages/Hyderabad/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
+      `http://epaper.deccanchronicle.com/epaperimages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
+      `http://epaper.deccanchronicle.com/epaperimages/${yyyy}/${mm}/${dd}/HYD${pgNum}.jpg`,
+    ];
+    let gotImage = false;
+    for (const url of urls) {
+      try {
+        console.log(`[DC] Trying URL: ${url}`);
+        await downloadFile(url, jpgPath);
+        if (fs.existsSync(jpgPath) && fs.statSync(jpgPath).size > 5000) {
+          console.log(`[DC] Direct URL success: ${url}`);
+          gotImage = true; break;
+        }
+        try { fs.unlinkSync(jpgPath); } catch (_) {}
+      } catch (e) { console.log(`[DC] URL failed: ${e.message.slice(0, 80)}`); }
+    }
 
-    if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
-      console.log(`[DC] Canvas failed — trying direct URL download...`);
-      const jpgPath = imgPath.replace('.png', '.jpg');
-      const urls = [
-        `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
-        `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/HYD${pgNum}.jpg`,
-        `http://epaper.deccanchronicle.com/PageImages/Hyderabad/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
-        `http://epaper.deccanchronicle.com/epaperimages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
-      ];
-      gotImage = false;
-      for (const url of urls) {
-        try {
-          await downloadFile(url, jpgPath);
-          if (fs.statSync(jpgPath).size > 5000) { gotImage = true; break; }
-          try { fs.unlinkSync(jpgPath); } catch (_) {}
-        } catch (e) { console.log(`[DC] URL failed: ${e.message.slice(0, 50)}`); }
+    // ── FALLBACK: Puppeteer canvas export ────────────────────────────────────
+    if (!gotImage) {
+      console.log(`[DC] Direct URLs failed — trying Puppeteer canvas...`);
+      gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
+      if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
+        console.log(`[DC] Page ${pgNum}: no image found via any method`); continue;
       }
     }
 
-    if (!gotImage) { console.log(`[DC] Page ${pgNum}: no image found`); continue; }
-
-    const actualPath = fs.existsSync(imgPath) ? imgPath : imgPath.replace('.png', '.jpg');
+    const actualPath = fs.existsSync(jpgPath) ? jpgPath : imgPath;
     console.log(`[DC] Image ready: ${(fs.statSync(actualPath).size / 1024).toFixed(0)}KB`);
 
     try {
