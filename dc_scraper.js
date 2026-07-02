@@ -11,7 +11,7 @@ const os        = require('os');
 
 const NEWSPAPER        = 'Deccan Chronicle';
 const STATES_URL       = 'http://epaper.deccanchronicle.com/states.aspx';
-const CLASSIFIEDS_PAGE = 8; // Always page 8 for Hyderabad edition
+const CLASSIFIEDS_PAGE = 2; // City page with classifieds section, Hyderabad edition
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -474,7 +474,7 @@ async function scrapeDate(page, targetDate) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
 
-  for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE + 1]) {
+  for (const pgNum of [CLASSIFIEDS_PAGE, CLASSIFIEDS_PAGE + 1, CLASSIFIEDS_PAGE + 2]) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.png`);
 
     let gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
@@ -517,7 +517,7 @@ async function scrapeDate(page, targetDate) {
       allAds.push(...ads);
 
       if (pgNum === CLASSIFIEDS_PAGE && ads.length > 10) {
-        console.log(`[DC] Page 8 has ${ads.length} ads — skipping page 9`);
+        console.log(`[DC] Page ${pgNum} has ${ads.length} ads — skipping remaining pages`);
         try { fs.unlinkSync(actualPath); } catch (_) {}
         break;
       }
