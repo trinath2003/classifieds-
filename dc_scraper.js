@@ -497,78 +497,78 @@ async function scrapeDate(page, targetDate) {
   });
   await delay(3000);
 
-  // Dynamically find the CITY page — classifieds are always in the CITY section
-  const cityPage = await getCityPageNum(page);
-  if (!cityPage) {
-    console.log(`[DC] Could not find CITY page in thumbnail strip — falling back to page ${CLASSIFIEDS_PAGE}`);
-  }
-  const startPage = cityPage || CLASSIFIEDS_PAGE;
-  console.log(`[DC] Will scrape pages: ${startPage}, ${startPage + 1}`);
+  // ── Scan ALL pages to find which ones have CLASSIFIEDS section ────────────
+  // Get full list of pages from thumbnail strip
+  const allPages = await page.evaluate(() => {
+    const pages = [];
+    const all = [...document.querySelectorAll('*')];
+    for (const el of all) {
+      const t = el.textContent.trim().toUpperCase();
+      const match = t.match(/^([A-Z]+)\((\d+)\)$/);
+      if (match) pages.push({ label: match[1], num: parseInt(match[2]) });
+    }
+    return pages;
+  });
+  console.log(`[DC] Found pages: ${allPages.map(p => `${p.label}(${p.num})`).join(', ')}`);
+
+  // Find all CITY pages — classifieds appear in CITY section
+  const cityPages = allPages.filter(p => p.label === 'CITY').map(p => p.num);
+  console.log(`[DC] CITY pages: ${cityPages.join(', ') || 'none found — will scan all'}`);
+
+  // If no CITY pages found, scan pages 2-10 as fallback
+  const pagesToScan = cityPages.length > 0 ? cityPages : [2,3,4,5,6,7,8,9,10];
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
+  const classifiedPages = []; // pages confirmed to have classifieds
 
-  for (const pgNum of [startPage, startPage + 1]) {
-    const imgPath = path.join(tmpDir, `page_${pgNum}.png`);
-    const jpgPath = imgPath.replace('.png', '.jpg');
-
-    // ── PRIMARY: direct URL download (date-accurate, bypasses viewer quirks) ─
-    const urls = [
-      `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
-      `http://epaper.deccanchronicle.com/PageImages/HYD/${yyyy}/${mm}/${dd}/HYD${pgNum}.jpg`,
-      `http://epaper.deccanchronicle.com/PageImages/Hyderabad/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
-      `http://epaper.deccanchronicle.com/epaperimages/HYD/${yyyy}/${mm}/${dd}/${pgNum}.jpg`,
-      `http://epaper.deccanchronicle.com/epaperimages/${yyyy}/${mm}/${dd}/HYD${pgNum}.jpg`,
-    ];
-    let gotImage = false;
-    for (const url of urls) {
-      try {
-        console.log(`[DC] Trying URL: ${url}`);
-        await downloadFile(url, jpgPath);
-        if (fs.existsSync(jpgPath) && fs.statSync(jpgPath).size > 5000) {
-          console.log(`[DC] Direct URL success: ${url}`);
-          gotImage = true; break;
-        }
-        try { fs.unlinkSync(jpgPath); } catch (_) {}
-      } catch (e) { console.log(`[DC] URL failed: ${e.message.slice(0, 80)}`); }
+  // ── Phase 1: Quick diagnostic scan to find which pages have classifieds ──
+  console.log(`[DC] Phase 1: scanning ${pagesToScan.length} pages for classifieds...`);
+  for (const pgNum of pagesToScan) {
+    const imgPath = path.join(tmpDir, `scan_${pgNum}.jpg`);
+    const gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
+    if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
+      console.log(`[DC] Page ${pgNum}: no image`); continue;
     }
 
-    // ── FALLBACK: Puppeteer canvas export ────────────────────────────────────
-    if (!gotImage) {
-      console.log(`[DC] Direct URLs failed — trying Puppeteer canvas...`);
-      gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
-      if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
-        console.log(`[DC] Page ${pgNum}: no image found via any method`); continue;
-      }
-    }
-
-    const actualPath = fs.existsSync(jpgPath) ? jpgPath : imgPath;
-    console.log(`[DC] Image ready: ${(fs.statSync(actualPath).size / 1024).toFixed(0)}KB`);
-
+    // Quick check — ask Groq if this page has classifieds (uses fewer tokens)
     try {
-      const rawAds = await extractAdsWithVision(actualPath);
-      console.log(`[DC] Extracted: ${rawAds.length} raw items`);
-
-      // Cross-verify skipped to stay under free-tier rate limits.
-      // Re-enable by uncommenting the line below if you upgrade your Groq plan.
-      // const verifiedAds = await crossVerifyAds(rawAds, dateStr, actualPath);
-      const verifiedAds = rawAds;
-
-      const ads = buildAds(verifiedAds, targetDate);
-      console.log(`[DC] Page ${pgNum}: ${ads.length} verified English classified ads`);
-      allAds.push(...ads);
-
-      if (pgNum === CLASSIFIEDS_PAGE && ads.length > 10) {
-        console.log(`[DC] Page ${pgNum} has ${ads.length} ads — skipping remaining pages`);
-        try { fs.unlinkSync(actualPath); } catch (_) {}
-        break;
-      }
-      // Pause between pages to stay under Groq free-tier tokens-per-minute limit
-      await delay(15000);
+      const checkPrompt = `Look at this newspaper page. Does it contain a CLASSIFIEDS section with small ads (property, jobs, notices etc)?
+Answer with ONLY one word: YES or NO`;
+      const answer = await callGroq(imgPath, checkPrompt);
+      const hasClassifieds = answer.trim().toUpperCase().startsWith('YES');
+      console.log(`[DC] Page ${pgNum}: classifieds=${hasClassifieds} (${answer.trim().slice(0,20)})`);
+      if (hasClassifieds) classifiedPages.push(pgNum);
     } catch (e) {
-      console.error(`[DC] Page ${pgNum} failed: ${e.message}`);
+      console.log(`[DC] Page ${pgNum} scan failed: ${e.message.slice(0,60)}`);
     }
-    try { fs.unlinkSync(actualPath); } catch (_) {}
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+    await delay(3000); // small pause between scan calls
+  }
+
+  console.log(`[DC] Classified pages found: ${classifiedPages.join(', ') || 'none'}`);
+
+  // ── Phase 2: Full extraction on confirmed classified pages ────────────────
+  console.log(`[DC] Phase 2: extracting ads from ${classifiedPages.length} classified pages...`);
+  for (const pgNum of classifiedPages) {
+    const imgPath = path.join(tmpDir, `page_${pgNum}.jpg`);
+    const gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
+    if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
+      console.log(`[DC] Page ${pgNum}: image fetch failed`); continue;
+    }
+
+    console.log(`[DC] Image ready: ${(fs.statSync(imgPath).size / 1024).toFixed(0)}KB`);
+    try {
+      const rawAds = await extractAdsWithVision(imgPath);
+      console.log(`[DC] Extracted: ${rawAds.length} raw items from page ${pgNum}`);
+      const ads = buildAds(rawAds, targetDate);
+      console.log(`[DC] Page ${pgNum}: ${ads.length} verified classified ads`);
+      allAds.push(...ads);
+    } catch (e) {
+      console.error(`[DC] Page ${pgNum} extraction failed: ${e.message}`);
+    }
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+    await delay(15000); // pause between pages for rate limit
   }
 
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
