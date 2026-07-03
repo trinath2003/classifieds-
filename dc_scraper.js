@@ -1,3 +1,4 @@
+
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
 // Uses Groq Vision API (free tier) for image extraction
 require('dotenv').config();
@@ -498,14 +499,21 @@ async function scrapeDate(page, targetDate) {
   await delay(3000);
 
   // ── Scan ALL pages to find which ones have CLASSIFIEDS section ────────────
-  // Get full list of pages from thumbnail strip
+  // Get full list of pages from thumbnail strip (deduplicated)
   const allPages = await page.evaluate(() => {
+    const seen = new Set();
     const pages = [];
     const all = [...document.querySelectorAll('*')];
     for (const el of all) {
       const t = el.textContent.trim().toUpperCase();
       const match = t.match(/^([A-Z]+)\((\d+)\)$/);
-      if (match) pages.push({ label: match[1], num: parseInt(match[2]) });
+      if (match) {
+        const key = `${match[1]}-${match[2]}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          pages.push({ label: match[1], num: parseInt(match[2]) });
+        }
+      }
     }
     return pages;
   });
@@ -513,54 +521,55 @@ async function scrapeDate(page, targetDate) {
 
   // Find all CITY pages — classifieds appear in CITY section
   const cityPages = allPages.filter(p => p.label === 'CITY').map(p => p.num);
-  console.log(`[DC] CITY pages: ${cityPages.join(', ') || 'none found — will scan all'}`);
+  console.log(`[DC] CITY pages: ${cityPages.join(', ') || 'none found — will scan pages 2-8'}`);
 
-  // If no CITY pages found, scan pages 2-10 as fallback
-  const pagesToScan = cityPages.length > 0 ? cityPages : [2,3,4,5,6,7,8,9,10];
+  // If no CITY pages found, scan pages 2-8 as fallback
+  const pagesToScan = cityPages.length > 0 ? cityPages : [2,3,4,5,6,7,8];
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
-  const classifiedPages = []; // pages confirmed to have classifieds
+  const classifiedPages = [];
 
-  // ── Phase 1: Quick diagnostic scan to find which pages have classifieds ──
+  // ── Phase 1: Quick scan to find which pages have classifieds ─────────────
   console.log(`[DC] Phase 1: scanning ${pagesToScan.length} pages for classifieds...`);
   for (const pgNum of pagesToScan) {
     const imgPath = path.join(tmpDir, `scan_${pgNum}.jpg`);
     const gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
     if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
-      console.log(`[DC] Page ${pgNum}: no image`); continue;
+      console.log(`[DC] Page ${pgNum}: no image — skipping`); continue;
     }
+    console.log(`[DC] Page ${pgNum}: image ${(fs.statSync(imgPath).size/1024).toFixed(0)}KB — checking for classifieds...`);
 
-    // Quick check — ask Groq if this page has classifieds (uses fewer tokens)
     try {
-      const checkPrompt = `Look at this newspaper page. Does it contain a CLASSIFIEDS section with small ads (property, jobs, notices etc)?
+      const checkPrompt = `Look carefully at this newspaper page image.
+Is there a section labeled "CLASSIFIEDS" containing small text ads about property, jobs, vehicles, or notices?
 Answer with ONLY one word: YES or NO`;
       const answer = await callGroq(imgPath, checkPrompt);
       const hasClassifieds = answer.trim().toUpperCase().startsWith('YES');
-      console.log(`[DC] Page ${pgNum}: classifieds=${hasClassifieds} (${answer.trim().slice(0,20)})`);
+      console.log(`[DC] Page ${pgNum}: classifieds=${hasClassifieds} (Groq said: "${answer.trim().slice(0,30)}")`);
       if (hasClassifieds) classifiedPages.push(pgNum);
     } catch (e) {
-      console.log(`[DC] Page ${pgNum} scan failed: ${e.message.slice(0,60)}`);
+      console.log(`[DC] Page ${pgNum} scan failed: ${e.message.slice(0,80)}`);
     }
     try { fs.unlinkSync(imgPath); } catch (_) {}
-    await delay(3000); // small pause between scan calls
+    await delay(5000); // pause between Groq calls
   }
 
   console.log(`[DC] Classified pages found: ${classifiedPages.join(', ') || 'none'}`);
 
   // ── Phase 2: Full extraction on confirmed classified pages ────────────────
-  console.log(`[DC] Phase 2: extracting ads from ${classifiedPages.length} classified pages...`);
+  console.log(`[DC] Phase 2: extracting ads from ${classifiedPages.length} page(s)...`);
   for (const pgNum of classifiedPages) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.jpg`);
     const gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
     if (!gotImage || !fs.existsSync(imgPath) || fs.statSync(imgPath).size < 5000) {
       console.log(`[DC] Page ${pgNum}: image fetch failed`); continue;
     }
+    console.log(`[DC] Page ${pgNum} image ready: ${(fs.statSync(imgPath).size/1024).toFixed(0)}KB`);
 
-    console.log(`[DC] Image ready: ${(fs.statSync(imgPath).size / 1024).toFixed(0)}KB`);
     try {
       const rawAds = await extractAdsWithVision(imgPath);
-      console.log(`[DC] Extracted: ${rawAds.length} raw items from page ${pgNum}`);
+      console.log(`[DC] Page ${pgNum}: extracted ${rawAds.length} raw items`);
       const ads = buildAds(rawAds, targetDate);
       console.log(`[DC] Page ${pgNum}: ${ads.length} verified classified ads`);
       allAds.push(...ads);
@@ -568,7 +577,7 @@ Answer with ONLY one word: YES or NO`;
       console.error(`[DC] Page ${pgNum} extraction failed: ${e.message}`);
     }
     try { fs.unlinkSync(imgPath); } catch (_) {}
-    await delay(15000); // pause between pages for rate limit
+    await delay(15000);
   }
 
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
