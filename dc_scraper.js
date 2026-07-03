@@ -291,13 +291,8 @@ function buildAds(verifiedAds, publishDate) {
     .filter(a => a && typeof a === 'object')
     .filter(a => {
       const txt = `${a.title || ''} ${a.description || ''}`.trim();
-      if (txt.length < 20) return false;
+      if (txt.length < 10) return false;
       if (!isEnglish(txt)) return false;
-      if (isBadTitle(a.title || '')) return false;
-      const words = (a.description || '')
-        .replace(/[^a-zA-Z\s]/g, ' ').trim()
-        .split(/\s+/).filter(w => w.length > 2);
-      if (words.length < 5) return false;
       return true;
     })
     .map(a => {
@@ -517,6 +512,7 @@ async function scrapeDate(page, targetDate) {
       const rawAds = await extractAdsWithVision(imgPath);
       console.log(`[DC] Page ${pgNum}: ${rawAds.length} raw ads extracted`);
       if (rawAds.length > 0) {
+        console.log(`[DC] Page ${pgNum} sample: ${JSON.stringify(rawAds[0]).slice(0, 150)}`);
         const ads = buildAds(rawAds, targetDate);
         console.log(`[DC] Page ${pgNum}: ${ads.length} verified classified ads`);
         allAds.push(...ads);
