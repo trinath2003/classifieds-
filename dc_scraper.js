@@ -77,7 +77,7 @@ async function callGroq(imagePath, prompt) {
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      model: 'meta-llama/llama-4-maverick-17b-128e-instruct',
       messages: [{
         role: 'user',
         content: [
@@ -492,12 +492,31 @@ async function scrapeDate(page, targetDate) {
   });
   await delay(3000);
 
-  // ── Scan pages 1-12 sequentially, extract ads from each ──────────────────
-  // No YES/NO pre-check — just extract directly. Pages with no ads return [].
+  // ── Find CITY pages from thumbnail strip, then scan only those ───────────
+  const allPageLabels = await page.evaluate(() => {
+    const seen = new Set();
+    const pages = [];
+    for (const el of document.querySelectorAll('*')) {
+      const t = el.textContent.trim().toUpperCase();
+      const match = t.match(/^([A-Z]+)\((\d+)\)$/);
+      if (match && !seen.has(`${match[1]}-${match[2]}`)) {
+        seen.add(`${match[1]}-${match[2]}`);
+        pages.push({ label: match[1], num: parseInt(match[2]) });
+      }
+    }
+    return pages;
+  });
+
+  // Target CITY pages — classifieds always appear there
+  // Fallback to pages 2,5,8 if no CITY pages detected
+  const cityNums = allPageLabels.filter(p => p.label === 'CITY').map(p => p.num);
+  const pagesToScan = cityNums.length > 0 ? cityNums : [2, 5, 8];
+  console.log(`[DC] Scanning pages: ${pagesToScan.join(', ')}`);
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
 
-  for (let pgNum = 1; pgNum <= 12; pgNum++) {
+  for (let pgNum of pagesToScan) {
     const imgPath = path.join(tmpDir, `page_${pgNum}.jpg`);
 
     const gotImage = await getPageImageFromViewer(page, pgNum, imgPath);
@@ -521,7 +540,7 @@ async function scrapeDate(page, targetDate) {
       console.error(`[DC] Page ${pgNum} failed: ${e.message}`);
     }
     try { fs.unlinkSync(imgPath); } catch (_) {}
-    await delay(10000); // 10s pause between pages for Groq rate limit
+    await delay(5000); // pause between Groq calls
   }
 
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
