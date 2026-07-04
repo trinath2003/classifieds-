@@ -114,35 +114,39 @@ function parseJSON(raw) {
 const EXTRACTION_PROMPT = `This is page 2 (CITY page) of Deccan Chronicle newspaper, Hyderabad edition.
 
 This page has BOTH news articles AND a small CLASSIFIEDS section (usually bottom-left corner).
-The classifieds section is labeled "CLASSIFIEDS" and contains small ads under headers like:
-FOR SALE PROPERTY, TEACHERS, FINANCE, SITUATION VACANT, POULTRY, NOTICE, RENTALS, HOTELS, PLOTS, FLATS, COMMERCIAL, BUSINESS OFFER, CHANGE OF NAME etc.
+The classifieds section is labeled "CLASSIFIEDS" and contains small ads.
 
-Your job: Extract ONLY the small classified ads from the CLASSIFIEDS section.
-IGNORE all news articles, headlines, and editorial content.
+IMPORTANT: Extract the FULL CONTENT of each individual classified ad, not just the section headers.
 
-A classified ad looks like:
-- Small text, tightly packed
-- Has a bold heading or category
-- Usually has a phone number like 040-XXXXXXXX or 9XXXXXXXXX
-- Short description (1-5 lines)
+For example, under "FOR SALE PROPERTY" there will be multiple individual ads like:
+- "3BHK flat, Gachibowli, 1200 sqft, Rs.85L, contact 9876543210"
+- "Independent house, Kukatpally, Rs.1.2Cr, 9123456789"
+
+Under "SITUATION VACANT" there will be individual job ads like:
+- "Required accountant, 5 years exp, call 9988776655"
+- "Security guards wanted, Hitech City, 8877665544"
+
+Each individual ad is a separate entry. DO NOT return section headers like "FOR SALE PROPERTY" or "SITUATION VACANT" as ads themselves.
 
 Return ONLY a valid JSON array (no markdown, no explanation):
 [{
-  "title": "heading or first meaningful line of the ad",
-  "description": "complete ad text exactly as printed in English",
-  "phone": "10-digit mobile or STD number or empty string",
-  "price": "price if mentioned or Not mentioned",
-  "location": "locality/area name in Hyderabad or empty string",
+  "title": "first meaningful line or heading of the individual ad",
+  "description": "complete full text of the ad including all details, price, location, contact",
+  "phone": "10-digit mobile or STD number, or empty string if none",
+  "price": "price if mentioned like Rs.45L or Rs.2.5Cr, or Not mentioned",
+  "location": "locality/area name in Hyderabad, or empty string",
   "category": "Property | Jobs | Automotive | Matrimonial | Other",
   "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | General"
 }]
 
 Category guide:
-- Property: flat/house/plot/land/villa/shop/commercial/farm/BHK/lease/rent/PG/hostel/hotels
-- Jobs: vacancy/vacancies/required/wanted/hiring/teacher/accountant/security/sales/situation vacant
-- Automotive: car/bike/vehicle/two-wheeler/four-wheeler/SUV
-- Matrimonial: bride/groom/alliance/matrimonial/match
-- Other: furniture/finance/lost/notice/poultry/building materials/change of name/business offer`;
+- Property: flat/house/plot/land/villa/shop/commercial/BHK/lease/rent/PG/hostel/hotels
+- Jobs: vacancy/required/wanted/hiring/teacher/accountant/security/situation vacant
+- Automotive: car/bike/vehicle/two-wheeler/four-wheeler
+- Matrimonial: bride/groom/alliance/match
+- Other: furniture/finance/notice/poultry/change of name/business offer
+
+If the classifieds section is not visible or has no individual ads, return an empty array: []`;
 
 // ── DIAGNOSTIC: confirm the model can actually read the page ───────────────
 // Runs every time before real extraction. Logs what the model sees —
