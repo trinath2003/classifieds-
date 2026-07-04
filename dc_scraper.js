@@ -111,42 +111,38 @@ function parseJSON(raw) {
 }
 
 // ── STEP 1: Extract ads from image using Groq Vision ─────────────────────
-const EXTRACTION_PROMPT = `This is page 2 (CITY page) of Deccan Chronicle newspaper, Hyderabad edition.
+const EXTRACTION_PROMPT = `This is a page from Deccan Chronicle newspaper, Hyderabad edition.
 
-This page has BOTH news articles AND a small CLASSIFIEDS section (usually bottom-left corner).
-The classifieds section is labeled "CLASSIFIEDS" and contains small ads.
+This page may be either:
+1. A FULL CLASSIFIEDS PAGE (entire page filled with classified ads in multiple columns)
+2. A CITY PAGE with a CLASSIFIEDS section in the bottom-left corner
 
-IMPORTANT: Extract the FULL CONTENT of each individual classified ad, not just the section headers.
+Extract EVERY individual classified advertisement you can read on this page.
 
-For example, under "FOR SALE PROPERTY" there will be multiple individual ads like:
-- "3BHK flat, Gachibowli, 1200 sqft, Rs.85L, contact 9876543210"
-- "Independent house, Kukatpally, Rs.1.2Cr, 9123456789"
+IMPORTANT RULES:
+- Extract INDIVIDUAL ADS, not section headers like "FOR SALE PROPERTY" or "SITUATION VACANT"
+- Each ad has its own text, usually with a description and phone number
+- Read carefully — ads are small and dense, packed tightly in columns
+- Include the FULL TEXT of each ad including all details
+- Skip news articles and editorial content
 
-Under "SITUATION VACANT" there will be individual job ads like:
-- "Required accountant, 5 years exp, call 9988776655"
-- "Security guards wanted, Hitech City, 8877665544"
-
-Each individual ad is a separate entry. DO NOT return section headers like "FOR SALE PROPERTY" or "SITUATION VACANT" as ads themselves.
+Example of what individual ads look like:
+- "3BHK flat, Gachibowli, 1200sqft, Rs.85L, contact 9876543210"
+- "Wanted experienced accountant, 5yrs exp, good salary, call 9988776655"
+- "Maruti Swift 2019, good condition, Rs.4.5L, 8877665544"
 
 Return ONLY a valid JSON array (no markdown, no explanation):
 [{
-  "title": "first meaningful line or heading of the individual ad",
-  "description": "complete full text of the ad including all details, price, location, contact",
-  "phone": "10-digit mobile or STD number, or empty string if none",
-  "price": "price if mentioned like Rs.45L or Rs.2.5Cr, or Not mentioned",
-  "location": "locality/area name in Hyderabad, or empty string",
+  "title": "first line or heading of the individual ad",
+  "description": "complete full text of the ad",
+  "phone": "10-digit number or empty string",
+  "price": "price if mentioned or Not mentioned",
+  "location": "area/locality in Hyderabad or empty string",
   "category": "Property | Jobs | Automotive | Matrimonial | Other",
   "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | General"
 }]
 
-Category guide:
-- Property: flat/house/plot/land/villa/shop/commercial/BHK/lease/rent/PG/hostel/hotels
-- Jobs: vacancy/required/wanted/hiring/teacher/accountant/security/situation vacant
-- Automotive: car/bike/vehicle/two-wheeler/four-wheeler
-- Matrimonial: bride/groom/alliance/match
-- Other: furniture/finance/notice/poultry/change of name/business offer
-
-If the classifieds section is not visible or has no individual ads, return an empty array: []`;
+If no individual classified ads are visible, return: []`;
 
 // ── DIAGNOSTIC: confirm the model can actually read the page ───────────────
 // Runs every time before real extraction. Logs what the model sees —
@@ -570,12 +566,12 @@ async function scrapeAndSave(dateFrom, dateTo) {
 
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1400,900'],
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1920,1080'],
   });
   const summary = [];
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1400, height: 900 });
+    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
