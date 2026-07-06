@@ -1,4 +1,3 @@
-
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
 // Uses Groq Vision API (free tier) for image extraction
 require('dotenv').config();
@@ -72,7 +71,12 @@ function downloadFile(url, dest) {
 }
 
 // ── Groq API ───────────────────────────────────────────────────────────────
-async function callGroq(imagePath, prompt) {
+// maxTokens defaults to a generous budget for classifieds pages — a dense
+// box can easily have 40-80+ small ads, and the old 4096-token cap was
+// getting hit and silently truncating the JSON mid-object (which then
+// failed to parse and the whole page's ads were lost). Diagnostic calls
+// pass a small maxTokens since they only need a few lines of plain text.
+async function callGroq(imagePath, prompt, maxTokens = 8000) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('GROQ_API_KEY not set in .env file');
 
@@ -98,7 +102,7 @@ async function callGroq(imagePath, prompt) {
         ]
       }],
       temperature: 0.1,
-      max_tokens: 4096,
+      max_tokens: maxTokens,
     }),
   });
 
@@ -109,17 +113,61 @@ async function callGroq(imagePath, prompt) {
 
   const data = await resp.json();
   const text = data.choices?.[0]?.message?.content || '';
+  const finishReason = data.choices?.[0]?.finish_reason;
+  if (finishReason === 'length') {
+    console.warn(`[DC] ⚠ Groq response was TRUNCATED (hit max_tokens=${maxTokens}) — some ads may be missing/cut off mid-object. Consider raising maxTokens further or splitting the image into smaller tiles.`);
+  }
   if (!text) throw new Error('Groq returned empty response');
   return text;
 }
 
+// Parses the model's JSON array response. If the response was truncated
+// (finish_reason: "length"), the array won't have a closing "]" and the
+// last object may be cut off mid-field — rather than throwing away the
+// entire batch, salvage every complete {...} object up to that point.
 function parseJSON(raw) {
   const clean = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
   try { return JSON.parse(clean); } catch (_) {
     const m = clean.match(/\[[\s\S]*\]/);
-    if (m) return JSON.parse(m[0]);
-    throw new Error('JSON parse failed: ' + clean.slice(0, 100));
+    if (m) {
+      try { return JSON.parse(m[0]); } catch (_) { /* fall through to salvage */ }
+    }
+    return salvageTruncatedArray(clean);
   }
+}
+
+// Best-effort recovery for a truncated JSON array: walks the string
+// tracking brace depth, and keeps every top-level {...} object that closed
+// cleanly before the text was cut off. Returns [] if nothing salvageable.
+function salvageTruncatedArray(text) {
+  const start = text.indexOf('[');
+  if (start === -1) throw new Error('JSON parse failed (no array found): ' + text.slice(0, 100));
+
+  const objects = [];
+  let depth = 0, objStart = -1, inString = false, escape = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) { escape = false; }
+      else if (ch === '\\') { escape = true; }
+      else if (ch === '"') { inString = false; }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { if (depth === 0) objStart = i; depth++; }
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0 && objStart !== -1) {
+        const chunk = text.slice(objStart, i + 1);
+        try { objects.push(JSON.parse(chunk)); } catch (_) { /* skip malformed object */ }
+        objStart = -1;
+      }
+    }
+  }
+
+  console.warn(`[DC] Salvaged ${objects.length} complete ad object(s) from a truncated/malformed response.`);
+  return objects;
 }
 
 // ── STEP 1: Extract ads from image using Groq Vision ─────────────────────
@@ -199,7 +247,7 @@ NEWS_HEADLINES: <copy first headline you see>`;
 // exactly what triggers the focused re-extraction pass below.
 async function diagnosticCheck(imagePath) {
   try {
-    const raw = await callGroq(imagePath, DIAGNOSTIC_PROMPT);
+    const raw = await callGroq(imagePath, DIAGNOSTIC_PROMPT, 400);
     console.log(`[DC] ── DIAGNOSTIC ──`);
     console.log(raw.trim());
     console.log(`[DC] ── END DIAGNOSTIC ──`);
@@ -283,7 +331,7 @@ async function cropImageFileViaCanvas(browser, imagePath, outPath, region, targe
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh);
-        return { ok: true, base64: c.toDataURL('image/jpeg', 0.92).split(',')[1] };
+        return { ok: true, base64: c.toDataURL('image/jpeg', 0.92).split(',')[1], sw, sh, dw, dh, srcW: img.naturalWidth, srcH: img.naturalHeight };
       } catch (e) {
         return { ok: false, reason: 'canvas error: ' + e.message };
       }
@@ -293,6 +341,7 @@ async function cropImageFileViaCanvas(browser, imagePath, outPath, region, targe
       console.log(`[DC] Crop-via-canvas failed: ${result.reason}`);
       return false;
     }
+    console.log(`[DC] Crop: source image ${result.srcW}x${result.srcH}px -> cropped region ${result.sw}x${result.sh}px (native) -> upscaled to ${result.dw}x${result.dh}px`);
     fs.writeFileSync(outPath, Buffer.from(result.base64, 'base64'));
     return true;
   } catch (e) {
@@ -686,7 +735,7 @@ async function getPageImageFromViewer(page, pgNum, outPath) {
   }, pgNum);
   await delay(8000); // wait longer for page image to fully render
 
-  const pngBase64 = await page.evaluate(() => {
+  const capture = await page.evaluate(() => {
     const selectors = [
       '#imgPage','#pageImage','#mainImage',
       'img[id*="imgPage"]','img[id*="PageImage"]','img[id*="mainImg"]',
@@ -702,20 +751,26 @@ async function getPageImageFromViewer(page, pgNum, outPath) {
         .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0];
     }
     if (!img) return null;
-    console.log('img:', img.id, img.naturalWidth + 'x' + img.naturalHeight);
+
+    const meta = { id: img.id, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, src: img.src };
     try {
       const c = document.createElement('canvas');
       c.width = img.naturalWidth; c.height = img.naturalHeight;
       c.getContext('2d').drawImage(img, 0, 0);
-      return c.toDataURL('image/png').split(',')[1];
-    } catch (e) { return '__SRC__' + img.src; }
+      return { ...meta, base64: c.toDataURL('image/png').split(',')[1], usedFallback: false };
+    } catch (e) {
+      return { ...meta, base64: null, usedFallback: true };
+    }
   });
 
-  if (!pngBase64) return false;
-  if (pngBase64.startsWith('__SRC__')) {
-    await downloadFile(pngBase64.slice(7), outPath);
+  if (!capture) return false;
+  console.log(`[DC] Page ${pgNum}: source image #${capture.id || '(no id)'} native resolution = ${capture.naturalWidth}x${capture.naturalHeight}px, src=${capture.src.slice(0, 100)}`);
+
+  if (capture.usedFallback || !capture.base64) {
+    await downloadFile(capture.src, outPath);
+    console.log(`[DC] Page ${pgNum}: canvas was tainted (cross-origin) — downloaded source image directly instead`);
   } else {
-    fs.writeFileSync(outPath, Buffer.from(pngBase64, 'base64'));
+    fs.writeFileSync(outPath, Buffer.from(capture.base64, 'base64'));
     console.log(`[DC] Canvas export: ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB PNG`);
   }
   return true;
