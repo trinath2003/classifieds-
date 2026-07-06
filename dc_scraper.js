@@ -9,10 +9,19 @@ const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
 const os        = require('os');
+const { Jimp, ResizeStrategy } = require('jimp'); // pure-JS image crop/resize — no native build deps.
+                                                    // npm install jimp (tested against jimp@1.6.1 API)
 
 const NEWSPAPER        = 'Deccan Chronicle';
 const STATES_URL       = 'http://epaper.deccanchronicle.com/states.aspx';
 const CLASSIFIEDS_PAGE = 2; // City page with classifieds section, Hyderabad edition
+
+// The classifieds box on a CITY page sits bottom-left (see reference
+// screenshots): roughly the left half of the page, starting about halfway
+// down. Generous padding on all sides so we never clip real ad text.
+// If a future edition moves the box, adjust these fractions.
+const CLASSIFIEDS_BOX_REGION = { xStart: 0, xEnd: 0.50, yStart: 0.48, yEnd: 1.0 };
+const CLASSIFIEDS_ZOOM_TARGET_WIDTH = 1800; // upscale crop to at least this width
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -135,17 +144,25 @@ Find every classified section using heading words such as: Classifieds, Situatio
 STEP 3 — READ EACH SECTION LINE BY LINE.
 - Do not skip any line, including single-line ads packed tightly between others.
 - An individual ad may span 1-4 lines — merge OCR fragments that clearly belong to the same ad into one entry.
-- Preserve phone numbers, email addresses, prices, area/locality names, and any other contact detail exactly as printed.
+- Preserve phone numbers, email addresses, prices, area/locality names, and any other contact detail exactly as printed. If a name is printed as part of the ad (owner name, contact person), keep it in the title/description exactly as spelled.
 - Correct obvious OCR mistakes using surrounding context (e.g. "Regured" -> "Required", "Expenenced" -> "Experienced", "Electrca" -> "Electrical", "0"/"O" and "1"/"l" confusions, stray cent/section-sign symbols embedded in words) — but never invent details that are not visible on the page.
-- Do NOT extract section header lines alone (e.g. "FOR SALE PROPERTY", "SITUATION VACANT") as if they were ads themselves — only the individual listings underneath them.
 - Skip news articles, editorial content, and display/brand advertisements entirely — only extract individual classified listings.
+
+CRITICAL — NEVER OUTPUT A HEADING AS IF IT WERE AN AD.
+Headings like "CHANGE OF NAME", "BUSINESS OFFER", "SITUATION VACANT", "FOR SALE PROPERTY", "PUBLIC NOTICE", "TENDER NOTICE", "MATRIMONIAL" are CATEGORY LABELS, not ads. Every real ad must have actual body text underneath its heading: a name, item, job role, property description, phone number, or price. If you cannot read any body text under a heading — the box is empty, cut off, or too small to read — DO NOT output an entry for it. Do not invent a placeholder like "No ad", "Not mentioned" as the whole ad, or repeat the heading text as the description. Skipping a heading with no legible body is correct behavior; fabricating a hollow entry for it is a failure.
+Bad output (never do this):
+{"title": "SITUATION VACANT", "description": "Full-time", "phone": "", "price": "Not mentioned", ...}
+{"title": "No ad", "description": "Not mentioned", ...}
+Good output (only if real body text is visible):
+{"title": "Accountant required, 5yrs exp", "description": "Wanted experienced accountant, 5yrs exp, good salary, call 9988776655", "phone": "9988776655", "email": "", ...}
 
 STEP 4 — OUTPUT.
 Return ONLY a valid JSON array (no markdown, no explanation, no page-analysis narrative — just the array):
 [{
-  "title": "first line or heading of the individual ad",
+  "title": "first line or heading of the individual ad — include a person's name here if one is printed",
   "description": "complete full text of the ad, fragments merged, OCR-corrected",
   "phone": "10-digit number or empty string",
+  "email": "email address exactly as printed, or empty string",
   "price": "price if mentioned or Not mentioned",
   "location": "area/locality in Hyderabad or empty string",
   "category": "Property | Jobs | Automotive | Matrimonial | Education | Tender | Notice | Other",
@@ -169,26 +186,151 @@ const DIAGNOSTIC_PROMPT = `Look at this newspaper page image carefully. This is 
 Answer ONLY in this exact plain-text format, one line each, no markdown:
 DATE_VISIBLE: <any date you can read on the page, or "none visible">
 PAGE_NUMBER: <page number visible on the page, or "none visible">
-CLASSIFIEDS_SECTION_VISIBLE: <yes | no — look for a section labeled CLASSIFIEDS in bottom-left>
+CLASSIFIEDS_SECTION_VISIBLE: <yes | no — look for a section labeled CLASSIFIEDS, usually boxed, in bottom-left>
+CLASSIFIEDS_COVERAGE: <boxed section | full page | none — "boxed section" if classifieds occupy roughly the bottom-left quarter/half of the page alongside news content; "full page" if classifieds/listings fill almost the entire page width and height>
 SAMPLE_CLASSIFIED_TEXT: <copy first few words of any classified ad you see, or "none found">
 NEWS_HEADLINES: <copy first headline you see>`;
 
+// Returns the parsed diagnostic fields (not just logs them) so the caller
+// can decide whether a classifieds section was reported visible even when
+// the main extraction pass came back empty/near-empty — that mismatch is
+// exactly what triggers the focused re-extraction pass below.
 async function diagnosticCheck(imagePath) {
   try {
     const raw = await callGroq(imagePath, DIAGNOSTIC_PROMPT);
     console.log(`[DC] ── DIAGNOSTIC ──`);
     console.log(raw.trim());
     console.log(`[DC] ── END DIAGNOSTIC ──`);
+    const get = (label) => {
+      const m = raw.match(new RegExp(label + ':\\s*(.+)'));
+      return m ? m[1].trim() : '';
+    };
+    return {
+      classifiedsVisible: /^yes/i.test(get('CLASSIFIEDS_SECTION_VISIBLE')),
+      coverage: get('CLASSIFIEDS_COVERAGE').toLowerCase(), // "boxed section" | "full page" | "none"
+      sampleText: get('SAMPLE_CLASSIFIED_TEXT'),
+    };
   } catch (e) {
     console.log(`[DC] DIAGNOSTIC FAILED: ${e.message}`);
+    return { classifiedsVisible: false, coverage: '', sampleText: '' };
   }
 }
 
-async function extractAdsWithVision(imagePath) {
-  await diagnosticCheck(imagePath);
+// Focused re-extraction used only as a last-resort fallback — if the crop
+// boundary missed the box for some reason, this re-attempt runs directly
+// on the ORIGINAL full-page image and tells the model to ignore everything
+// else and zoom into the classifieds box itself.
+const ZOOM_CLASSIFIEDS_PROMPT = `Ignore every other part of this newspaper page — news, headlines, display ads, everything.
+Focus ONLY on the boxed CLASSIFIEDS section (usually bottom-left, sometimes labeled with category headings like Situation Vacant, For Sale, Matrimonial, Public Notice, etc.).
+Read every single line inside that box, no matter how small the font. Transcribe each individual listing separately — do not merge unrelated listings, and do not skip any because the text is dense or tiny.
+Do NOT output a category heading on its own if there is no real ad text under it (see rules below).
+Merge OCR fragments that clearly belong to the same ad. Preserve phone numbers, emails, prices, names, and locations exactly.
+
+Return ONLY a valid JSON array, same schema as before:
+[{
+  "title": "first line or heading of the individual ad — include a person's name here if one is printed",
+  "description": "complete full text of the ad, fragments merged, OCR-corrected",
+  "phone": "10-digit number or empty string",
+  "email": "email address exactly as printed, or empty string",
+  "price": "price if mentioned or Not mentioned",
+  "location": "area/locality in Hyderabad or empty string",
+  "category": "Property | Jobs | Automotive | Matrimonial | Education | Tender | Notice | Other",
+  "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | Tender Notice | Public Notice | General",
+  "confidence": "High | Medium | Low"
+}]
+
+If, even after focusing only on this box, there is truly no legible ad text (only headings), return: []`;
+
+// ── CROP + ZOOM: turn the full page screenshot into a close-up of just the
+// classifieds box before it ever reaches the vision model. This is the main
+// fix for dense small-print classifieds being unreadable in a full-page
+// image: cropping throws away the irrelevant ~half of the page (news
+// columns) and upscaling gives the model far more actual pixel detail on
+// the text that matters.
+//
+// Returns { ready, imagePath, diagnostic, cropped }.
+// - ready=false means: diagnostic found no classifieds section on this
+//   page at all — caller should skip extraction entirely.
+async function prepareClassifiedsImage(fullImagePath, tmpDir, pgNum) {
+  const diagnostic = await diagnosticCheck(fullImagePath);
+
+  if (!diagnostic.classifiedsVisible) {
+    return { ready: false, imagePath: null, diagnostic, cropped: false };
+  }
+
+  const isFullPage = diagnostic.coverage.includes('full page');
+  const outPath = path.join(tmpDir, `classifieds_${pgNum}.jpg`);
+
+  try {
+    const img = await Jimp.read(fullImagePath);
+    const { width, height } = img.bitmap;
+
+    if (!isFullPage) {
+      const r = CLASSIFIEDS_BOX_REGION;
+      const x = Math.round(r.xStart * width);
+      const y = Math.round(r.yStart * height);
+      const w = Math.round((r.xEnd - r.xStart) * width);
+      const h = Math.round((r.yEnd - r.yStart) * height);
+      img.crop({ x, y, w, h });
+      console.log(`[DC] Page ${pgNum}: cropped to classifieds box (${w}x${h} from ${width}x${height})`);
+    } else {
+      console.log(`[DC] Page ${pgNum}: diagnostic says full-page classifieds — using whole page, no crop`);
+    }
+
+    if (img.bitmap.width < CLASSIFIEDS_ZOOM_TARGET_WIDTH) {
+      img.resize({ w: CLASSIFIEDS_ZOOM_TARGET_WIDTH, mode: ResizeStrategy.BICUBIC });
+      console.log(`[DC] Page ${pgNum}: upscaled to ${img.bitmap.width}x${img.bitmap.height} for legibility`);
+    }
+
+    await img.write(outPath, { quality: 92 });
+    return { ready: true, imagePath: outPath, diagnostic, cropped: !isFullPage };
+  } catch (e) {
+    console.log(`[DC] Page ${pgNum}: crop/zoom failed (${e.message}) — falling back to original full page image`);
+    return { ready: true, imagePath: fullImagePath, diagnostic, cropped: false };
+  }
+}
+
+async function extractAdsWithVision(imagePath, diagnostic, fullImagePathForFallback) {
   const raw = await callGroq(imagePath, EXTRACTION_PROMPT);
   console.log(`[DC] Groq raw (200 chars): ${raw.slice(0, 200)}`);
-  return parseJSON(raw);
+  let ads = parseJSON(raw);
+
+  // Safety net #1: still too few ads on the (likely cropped) image —
+  // retry once with the more directive zoom-focus prompt on the same image.
+  if (diagnostic.classifiedsVisible && ads.length < 2) {
+    console.log(`[DC] Classifieds reported visible but only ${ads.length} ads found — retrying with focused prompt on same image...`);
+    try {
+      const zoomRaw = await callGroq(imagePath, ZOOM_CLASSIFIEDS_PROMPT);
+      console.log(`[DC] Zoom pass raw (200 chars): ${zoomRaw.slice(0, 200)}`);
+      const zoomAds = parseJSON(zoomRaw);
+      console.log(`[DC] Zoom pass found ${zoomAds.length} ads`);
+      const seen = new Set(ads.map(a => `${a.title}|${a.phone}`));
+      for (const a of zoomAds) {
+        const key = `${a.title}|${a.phone}`;
+        if (!seen.has(key)) { seen.add(key); ads.push(a); }
+      }
+    } catch (e) {
+      console.log(`[DC] Zoom pass failed: ${e.message}`);
+    }
+  }
+
+  // Safety net #2: crop boundary may have missed the box entirely for this
+  // day's layout — if we're still empty and we have the original full page
+  // handy (and it's different from what we already tried), try that once.
+  if (diagnostic.classifiedsVisible && ads.length === 0 &&
+      fullImagePathForFallback && fullImagePathForFallback !== imagePath) {
+    console.log(`[DC] Still 0 ads after crop+zoom — last resort: trying original full-page image...`);
+    try {
+      const fallbackRaw = await callGroq(fullImagePathForFallback, ZOOM_CLASSIFIEDS_PROMPT);
+      const fallbackAds = parseJSON(fallbackRaw);
+      console.log(`[DC] Full-page fallback found ${fallbackAds.length} ads`);
+      ads = fallbackAds;
+    } catch (e) {
+      console.log(`[DC] Full-page fallback failed: ${e.message}`);
+    }
+  }
+
+  return ads;
 }
 
 // ── STEP 2: Cross-verify + correct OCR errors using the original image ─────
@@ -221,21 +363,24 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       `- Symbols like cent sign or section sign mixed in words -> remove them`,
       `- "0" vs "O", "1" vs "l" -> use image context to decide`,
       `- Verify phone numbers digit-by-digit against the image; if a number can't be confirmed, leave phone empty rather than guessing.`,
+      `- Verify any email address character-by-character against the image; if it can't be confirmed, leave email empty rather than guessing.`,
       `- If an entry is actually two ads merged together, split them into separate array items.`,
       `- If an entry is a fragment of a larger ad that continues on an adjacent line, merge it back into one item.`,
       `- Keep the "confidence" field: raise it to "High" once verified against the image, or lower it to "Low" if it still can't be confirmed.`,
       ``,
       `DROP these (not real classified ads):`,
       `- News headlines`,
-      `- Section headers alone with no ad body`,
+      `- Section/category headers alone with no ad body (e.g. "SITUATION VACANT", "CHANGE OF NAME", "BUSINESS OFFER", "FOR SALE PROPERTY", "PUBLIC NOTICE" used as the title with generic filler like "Not mentioned" or "Full-time" as the only description)`,
+      `- Any item whose title/description is literally a placeholder like "No ad", "None", "N/A", "Not mentioned" with nothing else`,
       `- Fragments under 5 meaningful words`,
       `- Mostly non-English (Telugu or Hindi) text`,
       `- Items where the title is just a phone number or location name`,
+      `- Items with no phone number, no email, no real price, and under 8 words of description — these are almost certainly leftover headers, not ads`,
       `- Items still marked "confidence": "Low" after verification with fewer than 8 meaningful words`,
       ``,
       `Return ONLY a valid JSON array. Same schema, drop invalid items:`,
       `[{"title":"corrected title","description":"corrected English description",`,
-      ` "phone":"10 digits or empty","price":"Rs.X L or Not mentioned",`,
+      ` "phone":"10 digits or empty","email":"email exactly as printed or empty","price":"Rs.X L or Not mentioned",`,
       ` "location":"Hyderabad area or empty",`,
       ` "category":"Property|Jobs|Automotive|Matrimonial|Education|Tender|Notice|Other",`,
       ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|Tender Notice|Public Notice|General",`,
@@ -281,6 +426,53 @@ function normalizeCategory(cat) {
   return 'Other';
 }
 
+// Section/category headings that the model sometimes echoes back as if
+// they were individual ads (seen in production: "CHANGE OF NAME",
+// "BUSINESS OFFER", "SITUATION VACANT", literally "No ad"). These are
+// never real listings on their own — treat an exact/near match as a
+// heading-echo unless the ad also carries real substance (phone/price/
+// enough description) alongside it.
+const HEADER_ECHO_TITLES = new Set([
+  'change of name', 'business offer', 'business offers', 'situation vacant',
+  'situations vacant', 'for sale property', 'for sale', 'for rent',
+  'pg / hostel', 'pg/hostel', 'public notice', 'public notices',
+  'tender notice', 'tender notices', 'matrimonial', 'wanted', 'recruitment',
+  'real estate', 'rentals', 'education', 'business opportunities',
+  'business opportunity', 'classifieds', 'classified', 'property',
+  'general', 'no ad', 'none', 'n/a', 'not mentioned', 'not applicable',
+]);
+
+const PLACEHOLDER_DESCRIPTIONS = new Set([
+  '', 'not mentioned', 'no ad', 'none', 'n/a', 'general', 'full-time',
+  'part-time', 'not applicable',
+]);
+
+// An entry is "hollow" — a heading or placeholder masquerading as an ad —
+// if it has no phone, no email, no real price, and either its title is a
+// known heading/placeholder or its description is too thin to be an actual ad.
+function isHollowAd(rawAd, cleanedPhone, cleanedEmail) {
+  const title = String(rawAd.title || '').trim().toLowerCase();
+  const desc  = String(rawAd.description || '').trim().toLowerCase();
+  const price = String(rawAd.price || '').trim().toLowerCase();
+
+  const hasPhone       = !!cleanedPhone;
+  const hasEmail        = !!cleanedEmail;
+  const hasRealPrice   = price && price !== 'not mentioned' && price !== 'n/a';
+  const descWordCount  = desc ? desc.split(/\s+/).filter(Boolean).length : 0;
+
+  if (hasPhone || hasEmail || hasRealPrice) return false; // has a concrete contact/price — trust it
+
+  const titleIsHeading      = HEADER_ECHO_TITLES.has(title);
+  const descIsPlaceholder   = PLACEHOLDER_DESCRIPTIONS.has(desc);
+  const descTooThin         = descWordCount < 8;
+
+  if (titleIsHeading && (descIsPlaceholder || descTooThin)) return true;
+  if (descIsPlaceholder && descTooThin) return true;
+  if (!hasPhone && !hasEmail && !hasRealPrice && descTooThin && titleIsHeading) return true;
+
+  return false;
+}
+
 function buildAds(verifiedAds, publishDate) {
   const today  = isoDate(publishDate);
   const dayPub = dayName(publishDate);
@@ -293,6 +485,13 @@ function buildAds(verifiedAds, publishDate) {
       return /^[6-9]\d{9}$/.test(num) ? num : '';
     }
     return '';
+  }
+
+  function cleanEmail(e) {
+    if (!e) return '';
+    const trimmed = String(e).trim();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(trimmed) ? trimmed.toLowerCase() : '';
   }
 
   function cleanLocation(loc, desc) {
@@ -321,7 +520,9 @@ function buildAds(verifiedAds, publishDate) {
     return false;
   }
 
-  return verifiedAds
+  let droppedHollow = 0;
+
+  const result = verifiedAds
     .filter(a => a && typeof a === 'object')
     .filter(a => {
       const txt = `${a.title || ''} ${a.description || ''}`.trim();
@@ -331,6 +532,12 @@ function buildAds(verifiedAds, publishDate) {
       // (mirrors the verify-prompt drop rule, in case the model missed it).
       const confidence = String(a.confidence || '').toLowerCase();
       if (confidence === 'low' && txt.split(/\s+/).length < 8) return false;
+      return true;
+    })
+    .filter(a => {
+      const phoneRaw = cleanPhone(a.phone);
+      const emailRaw = cleanEmail(a.email);
+      if (isHollowAd(a, phoneRaw, emailRaw)) { droppedHollow++; return false; }
       return true;
     })
     .map(a => {
@@ -350,10 +557,16 @@ function buildAds(verifiedAds, publishDate) {
         price:          a.price     || 'Not mentioned',
         size_area:      a.size_area || 'Not mentioned',
         phone:          cleanPhone(a.phone),
+        email:          cleanEmail(a.email),
         confidence:     a.confidence || 'Medium',
         source: 'scraper', newspaper_name: NEWSPAPER,
       };
     });
+
+  if (droppedHollow > 0) {
+    console.log(`[DC] Dropped ${droppedHollow} hollow/header-echo entries (no phone/price/body text)`);
+  }
+  return result;
 }
 
 // ── Save to DB ─────────────────────────────────────────────────────────────
@@ -374,7 +587,7 @@ async function saveAds(ads, publishDate) {
       `, [
         ad.date_published, ad.day_published, ad.category, ad.sub_category,
         ad.title, ad.description, ad.location, ad.price, ad.size_area,
-        ad.phone, '', '', ad.newspaper_name,
+        ad.phone, '', ad.email || '', ad.newspaper_name,
       ]);
       r.affectedRows > 0 ? inserted++ : skipped++;
     } catch (e) { console.error('[DC] Row:', e.message); skipped++; }
@@ -388,8 +601,8 @@ async function getCityPageNum(page) {
     const all = [...document.querySelectorAll('*')];
     for (const el of all) {
       const t = el.textContent.trim().toUpperCase();
-      // Match labels like CITY(5), CITY(6), CITY(7) — take the first one
-      const match = t.match(/^CITY\((\d+)\)$/);
+      // Match labels like CITY(5), CITY (6), CITY-7, CITY:8 — take the first one
+      const match = t.match(/^CITY\s*[\(\-:]?\s*(\d{1,2})\s*\)?$/);
       if (match) return parseInt(match[1]);
     }
     return null;
@@ -531,13 +744,17 @@ async function scrapeDate(page, targetDate) {
   });
   await delay(3000);
 
-  // ── Find CITY pages from thumbnail strip, then scan only those ───────────
+  // ── Find CITY/CLASSIFIED pages from thumbnail strip, then scan only those ─
+  // Some editions label the classifieds thumbnail directly (e.g. "CLASSIFIED(7)")
+  // instead of / in addition to "CITY(n)", and separators vary (parens, dash,
+  // colon, or just a space) — so the regex tolerates all of those and we union
+  // both label families rather than only trusting "CITY".
   const allPageLabels = await page.evaluate(() => {
     const seen = new Set();
     const pages = [];
     for (const el of document.querySelectorAll('*')) {
       const t = el.textContent.trim().toUpperCase();
-      const match = t.match(/^([A-Z]+)\((\d+)\)$/);
+      const match = t.match(/^([A-Z]+)\s*[\(\-:]?\s*(\d{1,2})\s*\)?$/);
       if (match && !seen.has(`${match[1]}-${match[2]}`)) {
         seen.add(`${match[1]}-${match[2]}`);
         pages.push({ label: match[1], num: parseInt(match[2]) });
@@ -545,11 +762,14 @@ async function scrapeDate(page, targetDate) {
     }
     return pages;
   });
+  console.log(`[DC] All thumbnail labels found: ${JSON.stringify(allPageLabels)}`);
 
-  // Target CITY pages — classifieds always appear there
-  // Fallback to pages 2,5,8 if no CITY pages detected
-  const cityNums = allPageLabels.filter(p => p.label === 'CITY').map(p => p.num);
-  const pagesToScan = cityNums.length > 0 ? cityNums : [2, 5, 8];
+  const cityNums = allPageLabels
+    .filter(p => p.label === 'CITY' || p.label.startsWith('CLASSIFIED'))
+    .map(p => p.num);
+  const uniqueSorted = [...new Set(cityNums)].sort((a, b) => a - b);
+  // Fallback to pages 2,5,8 if no CITY/CLASSIFIED pages detected at all
+  const pagesToScan = uniqueSorted.length > 0 ? uniqueSorted : [2, 5, 8];
   console.log(`[DC] Scanning pages: ${pagesToScan.join(', ')}`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
@@ -564,17 +784,26 @@ async function scrapeDate(page, targetDate) {
       try { fs.unlinkSync(imgPath); } catch (_) {}
       continue;
     }
-    console.log(`[DC] Page ${pgNum}: image ${(fs.statSync(imgPath).size/1024).toFixed(0)}KB — extracting...`);
+    console.log(`[DC] Page ${pgNum}: image ${(fs.statSync(imgPath).size/1024).toFixed(0)}KB — checking for classifieds section...`);
 
     try {
-      const rawAds = await extractAdsWithVision(imgPath);
-      console.log(`[DC] Page ${pgNum}: ${rawAds.length} raw ads extracted`);
-      if (rawAds.length > 0) {
-        console.log(`[DC] Page ${pgNum} sample: ${JSON.stringify(rawAds[0]).slice(0, 150)}`);
-        const verifiedAds = await crossVerifyAds(rawAds, dateStr, imgPath);
-        const ads = buildAds(verifiedAds, targetDate);
-        console.log(`[DC] Page ${pgNum}: ${ads.length} verified classified ads`);
-        allAds.push(...ads);
+      const { ready, imagePath: classifiedsImgPath, diagnostic } = await prepareClassifiedsImage(imgPath, tmpDir, pgNum);
+      if (!ready) {
+        console.log(`[DC] Page ${pgNum}: no classifieds section detected — skipping extraction`);
+      } else {
+        console.log(`[DC] Page ${pgNum}: classifieds detected (coverage="${diagnostic.coverage}", sample="${diagnostic.sampleText}") — extracting from ${classifiedsImgPath === imgPath ? 'full page' : 'cropped+zoomed'} image...`);
+        const rawAds = await extractAdsWithVision(classifiedsImgPath, diagnostic, imgPath);
+        console.log(`[DC] Page ${pgNum}: ${rawAds.length} raw ads extracted`);
+        if (rawAds.length > 0) {
+          console.log(`[DC] Page ${pgNum} sample: ${JSON.stringify(rawAds[0]).slice(0, 150)}`);
+          const verifiedAds = await crossVerifyAds(rawAds, dateStr, classifiedsImgPath);
+          const ads = buildAds(verifiedAds, targetDate);
+          console.log(`[DC] Page ${pgNum}: ${ads.length} verified classified ads`);
+          allAds.push(...ads);
+        }
+        if (classifiedsImgPath !== imgPath) {
+          try { fs.unlinkSync(classifiedsImgPath); } catch (_) {}
+        }
       }
     } catch (e) {
       console.error(`[DC] Page ${pgNum} failed: ${e.message}`);
