@@ -255,11 +255,15 @@ async function diagnosticCheck(imagePath) {
       const m = raw.match(new RegExp(label + ':\\s*(.+)'));
       return m ? m[1].trim() : '';
     };
-    return {
+    const result = {
       classifiedsVisible: /^yes/i.test(get('CLASSIFIEDS_SECTION_VISIBLE')),
       coverage: get('CLASSIFIEDS_COVERAGE').toLowerCase(), // "boxed section" | "full page" | "none"
       sampleText: get('SAMPLE_CLASSIFIED_TEXT'),
     };
+    // One single-line summary of the diagnostic result — easy to grab in a
+    // screenshot regardless of how the multi-line raw block above scrolls.
+    console.log(`[DC] DIAGNOSTIC SUMMARY: visible=${result.classifiedsVisible} coverage="${result.coverage}" sample="${result.sampleText}" dateVisible="${get('DATE_VISIBLE')}" pageNumberOnPage="${get('PAGE_NUMBER')}"`);
+    return result;
   } catch (e) {
     console.log(`[DC] DIAGNOSTIC FAILED: ${e.message}`);
     return { classifiedsVisible: false, coverage: '', sampleText: '' };
