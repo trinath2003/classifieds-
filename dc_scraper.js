@@ -1,3 +1,4 @@
+
 // dc_scraper.js — Deccan Chronicle Classifieds Scraper
 // Uses Groq Vision API (free tier) for image extraction
 require('dotenv').config();
@@ -111,38 +112,53 @@ function parseJSON(raw) {
 }
 
 // ── STEP 1: Extract ads from image using Groq Vision ─────────────────────
-const EXTRACTION_PROMPT = `This is a page from Deccan Chronicle newspaper, Hyderabad edition.
+// This prompt implements the full page-analysis pipeline: read the entire
+// page first, classify every region (news / display ad / classified /
+// notice / tender / etc.), locate classified sections by their heading
+// words, then walk them line-by-line so no ad is skipped or truncated.
+// The model still must return ONLY the JSON array below — the rigor lives
+// in *how* it reads the page, not in a separate narrative report, since
+// downstream code (buildAds/saveAds) needs strict JSON to run.
+const EXTRACTION_PROMPT = `You are an advanced OCR, document-layout, and classified-ad extraction system specialized for Deccan Chronicle newspaper pages (Hyderabad edition).
+
+STEP 1 — READ THE WHOLE PAGE FIRST.
+Before extracting anything, scan the entire page top-to-bottom, left-to-right, and mentally tag every region as one of:
+Headline, News Article, Editorial, Display Advertisement, Classified Advertisement, Public Notice, Tender Notice, Matrimonial, Recruitment / Situations Vacant, Property / Real Estate / Rentals, Education, Business Opportunity.
 
 This page may be either:
-1. A FULL CLASSIFIEDS PAGE (entire page filled with classified ads in multiple columns)
-2. A CITY PAGE with a CLASSIFIEDS section in the bottom-left corner
+1. A FULL CLASSIFIEDS PAGE (entire page filled with classified ads in multiple dense columns), or
+2. A CITY PAGE with a boxed CLASSIFIEDS section, usually in the bottom-left corner.
 
-Extract EVERY individual classified advertisement you can read on this page.
+STEP 2 — LOCATE CLASSIFIED SECTIONS.
+Find every classified section using heading words such as: Classifieds, Situations Vacant, Recruitment, Wanted, Matrimonial, Property, Real Estate, Rentals, Education, Business Opportunities, Public Notices, Tender Notices. A page can contain more than one such section/column.
 
-IMPORTANT RULES:
-- Extract INDIVIDUAL ADS, not section headers like "FOR SALE PROPERTY" or "SITUATION VACANT"
-- Each ad has its own text, usually with a description and phone number
-- Read carefully — ads are small and dense, packed tightly in columns
-- Include the FULL TEXT of each ad including all details
-- Skip news articles and editorial content
+STEP 3 — READ EACH SECTION LINE BY LINE.
+- Do not skip any line, including single-line ads packed tightly between others.
+- An individual ad may span 1-4 lines — merge OCR fragments that clearly belong to the same ad into one entry.
+- Preserve phone numbers, email addresses, prices, area/locality names, and any other contact detail exactly as printed.
+- Correct obvious OCR mistakes using surrounding context (e.g. "Regured" -> "Required", "Expenenced" -> "Experienced", "Electrca" -> "Electrical", "0"/"O" and "1"/"l" confusions, stray cent/section-sign symbols embedded in words) — but never invent details that are not visible on the page.
+- Do NOT extract section header lines alone (e.g. "FOR SALE PROPERTY", "SITUATION VACANT") as if they were ads themselves — only the individual listings underneath them.
+- Skip news articles, editorial content, and display/brand advertisements entirely — only extract individual classified listings.
+
+STEP 4 — OUTPUT.
+Return ONLY a valid JSON array (no markdown, no explanation, no page-analysis narrative — just the array):
+[{
+  "title": "first line or heading of the individual ad",
+  "description": "complete full text of the ad, fragments merged, OCR-corrected",
+  "phone": "10-digit number or empty string",
+  "price": "price if mentioned or Not mentioned",
+  "location": "area/locality in Hyderabad or empty string",
+  "category": "Property | Jobs | Automotive | Matrimonial | Education | Tender | Notice | Other",
+  "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | Tender Notice | Public Notice | General",
+  "confidence": "High | Medium | Low"
+}]
 
 Example of what individual ads look like:
 - "3BHK flat, Gachibowli, 1200sqft, Rs.85L, contact 9876543210"
 - "Wanted experienced accountant, 5yrs exp, good salary, call 9988776655"
 - "Maruti Swift 2019, good condition, Rs.4.5L, 8877665544"
 
-Return ONLY a valid JSON array (no markdown, no explanation):
-[{
-  "title": "first line or heading of the individual ad",
-  "description": "complete full text of the ad",
-  "phone": "10-digit number or empty string",
-  "price": "price if mentioned or Not mentioned",
-  "location": "area/locality in Hyderabad or empty string",
-  "category": "Property | Jobs | Automotive | Matrimonial | Other",
-  "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | General"
-}]
-
-If no individual classified ads are visible, return: []`;
+If no individual classified ads are visible anywhere on the page, return: []`;
 
 // ── DIAGNOSTIC: confirm the model can actually read the page ───────────────
 // Runs every time before real extraction. Logs what the model sees —
@@ -189,21 +205,25 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
     console.log(`[DC] Cross-verify batch ${batchNum}/${totalBatches}: ${batch.length} ads...`);
 
     const verifyPrompt = [
-      `You are correcting classified ads extracted from Deccan Chronicle, Hyderabad, ${dateStr}.`,
-      `I am giving you (1) the ORIGINAL NEWSPAPER IMAGE and (2) TEXT auto-extracted from it.`,
-      `The text has OCR errors. Look at the image to find each ad and correct the words.`,
+      `You are cross-verifying classified ads extracted from Deccan Chronicle, Hyderabad, ${dateStr}, against the ORIGINAL NEWSPAPER PAGE IMAGE.`,
+      `I am giving you (1) the ORIGINAL IMAGE and (2) TEXT auto-extracted from it in a first pass.`,
+      `The text may have OCR errors, merged/split ads, or misread contact details. Re-read the relevant lines in the image for each entry and correct it.`,
       ``,
-      `EXTRACTED TEXT (has errors):`,
+      `FIRST-PASS TEXT (has errors):`,
       JSON.stringify(batch, null, 2),
       ``,
-      `CORRECTION RULES (look at image to verify each word):`,
-      `- Fix garbled job titles, location names, company names by reading the image`,
+      `VERIFICATION RULES (check each entry against the image):`,
+      `- Confirm the ad text against the actual printed line(s); fix garbled job titles, location names, company names.`,
       `- "Bonerpaly" -> "Bowenpally" (Hyderabad area)`,
       `- "Expenenced" -> "Experienced"`,
       `- "Electrca" -> "Electrical"`,
       `- "Regured" -> "Required"`,
       `- Symbols like cent sign or section sign mixed in words -> remove them`,
       `- "0" vs "O", "1" vs "l" -> use image context to decide`,
+      `- Verify phone numbers digit-by-digit against the image; if a number can't be confirmed, leave phone empty rather than guessing.`,
+      `- If an entry is actually two ads merged together, split them into separate array items.`,
+      `- If an entry is a fragment of a larger ad that continues on an adjacent line, merge it back into one item.`,
+      `- Keep the "confidence" field: raise it to "High" once verified against the image, or lower it to "Low" if it still can't be confirmed.`,
       ``,
       `DROP these (not real classified ads):`,
       `- News headlines`,
@@ -211,13 +231,15 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       `- Fragments under 5 meaningful words`,
       `- Mostly non-English (Telugu or Hindi) text`,
       `- Items where the title is just a phone number or location name`,
+      `- Items still marked "confidence": "Low" after verification with fewer than 8 meaningful words`,
       ``,
       `Return ONLY a valid JSON array. Same schema, drop invalid items:`,
       `[{"title":"corrected title","description":"corrected English description",`,
       ` "phone":"10 digits or empty","price":"Rs.X L or Not mentioned",`,
       ` "location":"Hyderabad area or empty",`,
-      ` "category":"Property|Jobs|Automotive|Matrimonial|Other",`,
-      ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|General"}]`,
+      ` "category":"Property|Jobs|Automotive|Matrimonial|Education|Tender|Notice|Other",`,
+      ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|Tender Notice|Public Notice|General",`,
+      ` "confidence":"High|Medium|Low"}]`,
     ].join('\n');
 
     try {
@@ -246,6 +268,18 @@ const HYD_LOCALITIES = [
   'Beeramguda','Bowenpally','Malkajgiri','Alwal','Yapral','Nacharam',
   'Hayathnagar','Vanasthalipuram','Kothapet','Moosapet','Chintal','SR Nagar',
 ];
+
+// Categories the model may now emit (Education/Tender/Notice) get mapped
+// back onto the DB's existing category set so we don't break any UI/enum
+// that only expects Property | Jobs | Automotive | Matrimonial | Other.
+// The original, more specific category is kept in sub_category context.
+function normalizeCategory(cat) {
+  const c = String(cat || '').trim();
+  const known = ['Property', 'Jobs', 'Automotive', 'Matrimonial'];
+  if (known.includes(c)) return c;
+  if (c === 'Education' || c === 'Tender' || c === 'Notice') return 'Other';
+  return 'Other';
+}
 
 function buildAds(verifiedAds, publishDate) {
   const today  = isoDate(publishDate);
@@ -293,6 +327,10 @@ function buildAds(verifiedAds, publishDate) {
       const txt = `${a.title || ''} ${a.description || ''}`.trim();
       if (txt.length < 10) return false;
       if (!isEnglish(txt)) return false;
+      // Drop anything still flagged Low confidence with too little content
+      // (mirrors the verify-prompt drop rule, in case the model missed it).
+      const confidence = String(a.confidence || '').toLowerCase();
+      if (confidence === 'low' && txt.split(/\s+/).length < 8) return false;
       return true;
     })
     .map(a => {
@@ -304,7 +342,7 @@ function buildAds(verifiedAds, publishDate) {
       return {
         date_published: today,
         day_published:  dayPub,
-        category:       a.category     || 'Other',
+        category:       normalizeCategory(a.category),
         sub_category:   a.sub_category || 'General',
         title,
         description:    String(a.description || '').trim(),
@@ -312,6 +350,7 @@ function buildAds(verifiedAds, publishDate) {
         price:          a.price     || 'Not mentioned',
         size_area:      a.size_area || 'Not mentioned',
         phone:          cleanPhone(a.phone),
+        confidence:     a.confidence || 'Medium',
         source: 'scraper', newspaper_name: NEWSPAPER,
       };
     });
@@ -532,7 +571,8 @@ async function scrapeDate(page, targetDate) {
       console.log(`[DC] Page ${pgNum}: ${rawAds.length} raw ads extracted`);
       if (rawAds.length > 0) {
         console.log(`[DC] Page ${pgNum} sample: ${JSON.stringify(rawAds[0]).slice(0, 150)}`);
-        const ads = buildAds(rawAds, targetDate);
+        const verifiedAds = await crossVerifyAds(rawAds, dateStr, imgPath);
+        const ads = buildAds(verifiedAds, targetDate);
         console.log(`[DC] Page ${pgNum}: ${ads.length} verified classified ads`);
         allAds.push(...ads);
       }
