@@ -243,54 +243,64 @@ Return ONLY a valid JSON array, same schema as before:
 
 If, even after focusing only on this box, there is truly no legible ad text (only headings), return: []`;
 
-// Crops the currently-rendered page <img> to the classifieds box region and
-// upscales it, entirely inside the browser via <canvas> — the same
-// technique getPageImageFromViewer already uses for the full screenshot,
-// so this needs no extra npm dependency. Must be called while `page` is
-// still showing the same rendered page image (no navigation in between).
-async function cropClassifiedsInBrowser(page, outPath, region, targetWidth) {
-  const base64 = await page.evaluate(({ region, targetWidth }) => {
-    const selectors = [
-      '#imgPage', '#pageImage', '#mainImage',
-      'img[id*="imgPage"]', 'img[id*="PageImage"]', 'img[id*="mainImg"]',
-    ];
-    let img = null;
-    for (const s of selectors) {
-      const el = document.querySelector(s);
-      if (el && el.naturalWidth > 400) { img = el; break; }
-    }
-    if (!img) {
-      img = [...document.querySelectorAll('img')]
-        .filter(i => i.naturalWidth > 400 && !i.src.includes('logo') && !i.src.includes('icon'))
-        .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0];
-    }
-    if (!img) return null;
+// Crops an already-downloaded JPEG (on disk) to the classifieds box region
+// and upscales it, entirely via <canvas>. Loads the file into a FRESH,
+// blank page as a data: URI first — data: URIs are always same-origin, so
+// this can never hit a "tainted canvas" CORS error, unlike cropping the
+// <img> straight off the live epaper page (which depends on that site's
+// CORS headers and silently fails if they're restrictive). Needs no extra
+// npm dependency, and doesn't care whether the epaper page has navigated
+// away in the meantime since it only touches the file already on disk.
+async function cropImageFileViaCanvas(browser, imagePath, outPath, region, targetWidth) {
+  const buf = fs.readFileSync(imagePath);
+  const dataUrl = `data:image/jpeg;base64,${buf.toString('base64')}`;
+  const tmpPage = await browser.newPage();
+  try {
+    await tmpPage.setContent(`<img id="src" src="${dataUrl}">`, { waitUntil: 'load' });
+    await tmpPage.waitForFunction(() => {
+      const img = document.getElementById('src');
+      return img && img.complete && img.naturalWidth > 0;
+    }, { timeout: 15000 });
 
-    const sx = Math.round(region.xStart * img.naturalWidth);
-    const sy = Math.round(region.yStart * img.naturalHeight);
-    const sw = Math.round((region.xEnd - region.xStart) * img.naturalWidth);
-    const sh = Math.round((region.yEnd - region.yStart) * img.naturalHeight);
-    const scale = Math.max(1, targetWidth / sw);
-    const dw = Math.round(sw * scale);
-    const dh = Math.round(sh * scale);
+    const result = await tmpPage.evaluate(({ region, targetWidth }) => {
+      const img = document.getElementById('src');
+      if (!img || !img.naturalWidth) return { ok: false, reason: 'image not loaded' };
 
-    try {
-      const c = document.createElement('canvas');
-      c.width = dw; c.height = dh;
-      const ctx = c.getContext('2d');
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh);
-      return c.toDataURL('image/jpeg', 0.92).split(',')[1];
-    } catch (e) {
-      // Cross-origin/tainted canvas or similar — caller falls back to full page.
-      return null;
+      const sx = Math.round(region.xStart * img.naturalWidth);
+      const sy = Math.round(region.yStart * img.naturalHeight);
+      const sw = Math.round((region.xEnd - region.xStart) * img.naturalWidth);
+      const sh = Math.round((region.yEnd - region.yStart) * img.naturalHeight);
+      if (sw < 10 || sh < 10) return { ok: false, reason: `crop region too small (${sw}x${sh})` };
+
+      const scale = Math.max(1, targetWidth / sw);
+      const dw = Math.round(sw * scale);
+      const dh = Math.round(sh * scale);
+
+      try {
+        const c = document.createElement('canvas');
+        c.width = dw; c.height = dh;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh);
+        return { ok: true, base64: c.toDataURL('image/jpeg', 0.92).split(',')[1] };
+      } catch (e) {
+        return { ok: false, reason: 'canvas error: ' + e.message };
+      }
+    }, { region, targetWidth });
+
+    if (!result.ok) {
+      console.log(`[DC] Crop-via-canvas failed: ${result.reason}`);
+      return false;
     }
-  }, { region, targetWidth });
-
-  if (!base64) return false;
-  fs.writeFileSync(outPath, Buffer.from(base64, 'base64'));
-  return true;
+    fs.writeFileSync(outPath, Buffer.from(result.base64, 'base64'));
+    return true;
+  } catch (e) {
+    console.log(`[DC] Crop-via-canvas exception: ${e.message}`);
+    return false;
+  } finally {
+    await tmpPage.close().catch(() => {});
+  }
 }
 
 // ── CROP + ZOOM: turn the full page screenshot into a close-up of just the
@@ -318,7 +328,8 @@ async function prepareClassifiedsImage(page, fullImagePath, tmpDir, pgNum) {
 
   const outPath = path.join(tmpDir, `classifieds_${pgNum}.jpg`);
   try {
-    const cropped = await cropClassifiedsInBrowser(page, outPath, CLASSIFIEDS_BOX_REGION, CLASSIFIEDS_ZOOM_TARGET_WIDTH);
+    const browser = page.browser();
+    const cropped = await cropImageFileViaCanvas(browser, fullImagePath, outPath, CLASSIFIEDS_BOX_REGION, CLASSIFIEDS_ZOOM_TARGET_WIDTH);
     if (cropped && fs.existsSync(outPath) && fs.statSync(outPath).size > 2000) {
       console.log(`[DC] Page ${pgNum}: cropped+zoomed classifieds box ready (${(fs.statSync(outPath).size/1024).toFixed(0)}KB)`);
       return { ready: true, imagePath: outPath, diagnostic, cropped: true };
@@ -785,11 +796,10 @@ async function scrapeDate(page, targetDate) {
   });
   await delay(3000);
 
-  // ── Find CITY/CLASSIFIED pages from thumbnail strip, then scan only those ─
-  // Some editions label the classifieds thumbnail directly (e.g. "CLASSIFIED(7)")
-  // instead of / in addition to "CITY(n)", and separators vary (parens, dash,
-  // colon, or just a space) — so the regex tolerates all of those and we union
-  // both label families rather than only trusting "CITY".
+  // ── Only scan the 2nd CITY page — this is where classifieds live for the
+  // Hyderabad edition. We still read the thumbnail strip (for logging/
+  // debugging) so you can see every page label the viewer reports, but the
+  // actual scan list is locked to CITY page #2 only.
   const allPageLabels = await page.evaluate(() => {
     const seen = new Set();
     const pages = [];
@@ -805,13 +815,9 @@ async function scrapeDate(page, targetDate) {
   });
   console.log(`[DC] All thumbnail labels found: ${JSON.stringify(allPageLabels)}`);
 
-  const cityNums = allPageLabels
-    .filter(p => p.label === 'CITY' || p.label.startsWith('CLASSIFIED'))
-    .map(p => p.num);
-  const uniqueSorted = [...new Set(cityNums)].sort((a, b) => a - b);
-  // Fallback to pages 2,5,8 if no CITY/CLASSIFIED pages detected at all
-  const pagesToScan = uniqueSorted.length > 0 ? uniqueSorted : [2, 5, 8];
-  console.log(`[DC] Scanning pages: ${pagesToScan.join(', ')}`);
+  const cityLabels = allPageLabels.filter(p => p.label === 'CITY');
+  console.log(`[DC] CITY pages found: ${cityLabels.map(p => p.num).join(', ') || 'none'} — scanning only page ${CLASSIFIEDS_PAGE} (fixed)`);
+  const pagesToScan = [CLASSIFIEDS_PAGE];
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_'));
   const allAds = [];
