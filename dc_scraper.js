@@ -9,8 +9,10 @@ const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
 const os        = require('os');
-const { Jimp, ResizeStrategy } = require('jimp'); // pure-JS image crop/resize — no native build deps.
-                                                    // npm install jimp (tested against jimp@1.6.1 API)
+// Classifieds crop/zoom is done via an in-browser <canvas> inside the same
+// puppeteer page that already captures the full-page screenshot (see
+// cropClassifiedsInBrowser below) — no extra image library or dependency
+// needed, so there's nothing here that can be "missing" on deploy.
 
 const NEWSPAPER        = 'Deccan Chronicle';
 const STATES_URL       = 'http://epaper.deccanchronicle.com/states.aspx';
@@ -241,6 +243,56 @@ Return ONLY a valid JSON array, same schema as before:
 
 If, even after focusing only on this box, there is truly no legible ad text (only headings), return: []`;
 
+// Crops the currently-rendered page <img> to the classifieds box region and
+// upscales it, entirely inside the browser via <canvas> — the same
+// technique getPageImageFromViewer already uses for the full screenshot,
+// so this needs no extra npm dependency. Must be called while `page` is
+// still showing the same rendered page image (no navigation in between).
+async function cropClassifiedsInBrowser(page, outPath, region, targetWidth) {
+  const base64 = await page.evaluate(({ region, targetWidth }) => {
+    const selectors = [
+      '#imgPage', '#pageImage', '#mainImage',
+      'img[id*="imgPage"]', 'img[id*="PageImage"]', 'img[id*="mainImg"]',
+    ];
+    let img = null;
+    for (const s of selectors) {
+      const el = document.querySelector(s);
+      if (el && el.naturalWidth > 400) { img = el; break; }
+    }
+    if (!img) {
+      img = [...document.querySelectorAll('img')]
+        .filter(i => i.naturalWidth > 400 && !i.src.includes('logo') && !i.src.includes('icon'))
+        .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0];
+    }
+    if (!img) return null;
+
+    const sx = Math.round(region.xStart * img.naturalWidth);
+    const sy = Math.round(region.yStart * img.naturalHeight);
+    const sw = Math.round((region.xEnd - region.xStart) * img.naturalWidth);
+    const sh = Math.round((region.yEnd - region.yStart) * img.naturalHeight);
+    const scale = Math.max(1, targetWidth / sw);
+    const dw = Math.round(sw * scale);
+    const dh = Math.round(sh * scale);
+
+    try {
+      const c = document.createElement('canvas');
+      c.width = dw; c.height = dh;
+      const ctx = c.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh);
+      return c.toDataURL('image/jpeg', 0.92).split(',')[1];
+    } catch (e) {
+      // Cross-origin/tainted canvas or similar — caller falls back to full page.
+      return null;
+    }
+  }, { region, targetWidth });
+
+  if (!base64) return false;
+  fs.writeFileSync(outPath, Buffer.from(base64, 'base64'));
+  return true;
+}
+
 // ── CROP + ZOOM: turn the full page screenshot into a close-up of just the
 // classifieds box before it ever reaches the vision model. This is the main
 // fix for dense small-print classifieds being unreadable in a full-page
@@ -251,7 +303,7 @@ If, even after focusing only on this box, there is truly no legible ad text (onl
 // Returns { ready, imagePath, diagnostic, cropped }.
 // - ready=false means: diagnostic found no classifieds section on this
 //   page at all — caller should skip extraction entirely.
-async function prepareClassifiedsImage(fullImagePath, tmpDir, pgNum) {
+async function prepareClassifiedsImage(page, fullImagePath, tmpDir, pgNum) {
   const diagnostic = await diagnosticCheck(fullImagePath);
 
   if (!diagnostic.classifiedsVisible) {
@@ -259,33 +311,22 @@ async function prepareClassifiedsImage(fullImagePath, tmpDir, pgNum) {
   }
 
   const isFullPage = diagnostic.coverage.includes('full page');
+  if (isFullPage) {
+    console.log(`[DC] Page ${pgNum}: diagnostic says full-page classifieds — using whole page, no crop`);
+    return { ready: true, imagePath: fullImagePath, diagnostic, cropped: false };
+  }
+
   const outPath = path.join(tmpDir, `classifieds_${pgNum}.jpg`);
-
   try {
-    const img = await Jimp.read(fullImagePath);
-    const { width, height } = img.bitmap;
-
-    if (!isFullPage) {
-      const r = CLASSIFIEDS_BOX_REGION;
-      const x = Math.round(r.xStart * width);
-      const y = Math.round(r.yStart * height);
-      const w = Math.round((r.xEnd - r.xStart) * width);
-      const h = Math.round((r.yEnd - r.yStart) * height);
-      img.crop({ x, y, w, h });
-      console.log(`[DC] Page ${pgNum}: cropped to classifieds box (${w}x${h} from ${width}x${height})`);
-    } else {
-      console.log(`[DC] Page ${pgNum}: diagnostic says full-page classifieds — using whole page, no crop`);
+    const cropped = await cropClassifiedsInBrowser(page, outPath, CLASSIFIEDS_BOX_REGION, CLASSIFIEDS_ZOOM_TARGET_WIDTH);
+    if (cropped && fs.existsSync(outPath) && fs.statSync(outPath).size > 2000) {
+      console.log(`[DC] Page ${pgNum}: cropped+zoomed classifieds box ready (${(fs.statSync(outPath).size/1024).toFixed(0)}KB)`);
+      return { ready: true, imagePath: outPath, diagnostic, cropped: true };
     }
-
-    if (img.bitmap.width < CLASSIFIEDS_ZOOM_TARGET_WIDTH) {
-      img.resize({ w: CLASSIFIEDS_ZOOM_TARGET_WIDTH, mode: ResizeStrategy.BICUBIC });
-      console.log(`[DC] Page ${pgNum}: upscaled to ${img.bitmap.width}x${img.bitmap.height} for legibility`);
-    }
-
-    await img.write(outPath, { quality: 92 });
-    return { ready: true, imagePath: outPath, diagnostic, cropped: !isFullPage };
+    console.log(`[DC] Page ${pgNum}: crop failed or produced empty image — falling back to full page`);
+    return { ready: true, imagePath: fullImagePath, diagnostic, cropped: false };
   } catch (e) {
-    console.log(`[DC] Page ${pgNum}: crop/zoom failed (${e.message}) — falling back to original full page image`);
+    console.log(`[DC] Page ${pgNum}: crop/zoom error (${e.message}) — falling back to original full page image`);
     return { ready: true, imagePath: fullImagePath, diagnostic, cropped: false };
   }
 }
@@ -787,7 +828,7 @@ async function scrapeDate(page, targetDate) {
     console.log(`[DC] Page ${pgNum}: image ${(fs.statSync(imgPath).size/1024).toFixed(0)}KB — checking for classifieds section...`);
 
     try {
-      const { ready, imagePath: classifiedsImgPath, diagnostic } = await prepareClassifiedsImage(imgPath, tmpDir, pgNum);
+      const { ready, imagePath: classifiedsImgPath, diagnostic } = await prepareClassifiedsImage(page, imgPath, tmpDir, pgNum);
       if (!ready) {
         console.log(`[DC] Page ${pgNum}: no classifieds section detected — skipping extraction`);
       } else {
