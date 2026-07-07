@@ -363,15 +363,22 @@ async function cropImageFileViaCanvas(browser, imagePath, outPath, region, targe
 // columns) and upscaling gives the model far more actual pixel detail on
 // the text that matters.
 //
-// Returns { ready, imagePath, diagnostic, cropped }.
-// - ready=false means: diagnostic found no classifieds section on this
-//   page at all — caller should skip extraction entirely.
+// CLASSIFIEDS_PAGE (page 2) is confirmed to ALWAYS contain a classifieds
+// section on this edition — so the diagnostic is no longer used to decide
+// whether to skip extraction (a single misread there was causing real
+// classifieds pages to be skipped entirely). It's still run, and still
+// used to decide whether to crop (boxed section) or use the full page
+// as-is (full-page classifieds), and still logged for visibility.
 async function prepareClassifiedsImage(page, fullImagePath, tmpDir, pgNum) {
   const diagnostic = await diagnosticCheck(fullImagePath);
 
   if (!diagnostic.classifiedsVisible) {
-    return { ready: false, imagePath: null, diagnostic, cropped: false };
+    console.log(`[DC] Page ${pgNum}: diagnostic reported no classifieds visible, but this page is known to always have a classifieds section — proceeding with extraction anyway.`);
   }
+  // Always treat this known page as containing classifieds, regardless of
+  // what the diagnostic saw, so downstream logic (zoom-retry safety nets
+  // in extractAdsWithVision) still engages correctly.
+  diagnostic.classifiedsVisible = true;
 
   const isFullPage = diagnostic.coverage.includes('full page');
   if (isFullPage) {
@@ -508,6 +515,49 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
   return allVerified;
 }
 
+// ── MANUAL UPLOAD PATH ──────────────────────────────────────────────────
+// For when a person uploads their own photo/screenshot of the classifieds
+// section directly (bypassing the epaper site entirely — no puppeteer, no
+// page-numbering drift, no CORS/resolution issues). The person is expected
+// to have already framed a reasonably clean, in-focus shot of just the
+// classifieds text, so no crop/coverage-detection step is needed here —
+// straight to extraction, using the same prompts, safety-net retries, and
+// verification pass as the automated scraper.
+//
+// Returns the built ad objects (does not save to DB — call saveAds
+// yourself with source='pdf_import' or similar, or use
+// processAndSaveUploadedImage below for a one-call version).
+async function processUploadedClassifiedsImage(imagePath, targetDate) {
+  if (!fs.existsSync(imagePath)) {
+    throw new Error(`Uploaded image not found at ${imagePath}`);
+  }
+  const dateStr = isoDate(targetDate);
+  console.log(`[DC] Manual upload: processing ${imagePath} for ${dateStr}`);
+
+  // Synthetic diagnostic: we already know this image is meant to contain
+  // classifieds (the person uploaded it for that purpose), so skip the
+  // visibility gate entirely and just extract.
+  const diagnostic = { classifiedsVisible: true, coverage: 'boxed section', sampleText: '' };
+
+  const rawAds = await extractAdsWithVision(imagePath, diagnostic, imagePath);
+  console.log(`[DC] Manual upload: ${rawAds.length} raw ads extracted`);
+  if (rawAds.length === 0) return [];
+
+  const verifiedAds = await crossVerifyAds(rawAds, dateStr, imagePath);
+  const ads = buildAds(verifiedAds, targetDate, 'pdf_import');
+  console.log(`[DC] Manual upload: ${ads.length} verified classified ads`);
+  return ads;
+}
+
+// Convenience wrapper: process + save in one call, mirroring the shape
+// scrapeAndSave returns so both paths can share the same summary UI.
+async function processAndSaveUploadedImage(imagePath, targetDate) {
+  const ads    = await processUploadedClassifiedsImage(imagePath, targetDate);
+  const result = await saveAds(ads, targetDate, 'pdf_import');
+  console.log(`[DC] Manual upload ✓ ${isoDate(targetDate)}: inserted=${result.inserted} total=${ads.length}`);
+  return { date: isoDate(targetDate), day: dayName(targetDate), ...result, total: ads.length };
+}
+
 // ── STEP 3: Build + filter final ad objects ────────────────────────────────
 const HYD_LOCALITIES = [
   'Jubilee Hills','Banjara Hills','Gachibowli','Madhapur','Hitech City','Kondapur',
@@ -578,7 +628,7 @@ function isHollowAd(rawAd, cleanedPhone, cleanedEmail) {
   return false;
 }
 
-function buildAds(verifiedAds, publishDate) {
+function buildAds(verifiedAds, publishDate, source = 'scraper') {
   const today  = isoDate(publishDate);
   const dayPub = dayName(publishDate);
 
@@ -664,7 +714,7 @@ function buildAds(verifiedAds, publishDate) {
         phone:          cleanPhone(a.phone),
         email:          cleanEmail(a.email),
         confidence:     a.confidence || 'Medium',
-        source: 'scraper', newspaper_name: NEWSPAPER,
+        source, newspaper_name: NEWSPAPER,
       };
     });
 
@@ -675,11 +725,11 @@ function buildAds(verifiedAds, publishDate) {
 }
 
 // ── Save to DB ─────────────────────────────────────────────────────────────
-async function saveAds(ads, publishDate) {
+async function saveAds(ads, publishDate, source = 'scraper') {
   if (!ads.length) return { inserted: 0, skipped: 0 };
   await db.query(
-    `DELETE FROM classified_ads WHERE newspaper_name=? AND source='scraper' AND date_published=?`,
-    [NEWSPAPER, isoDate(publishDate)]
+    `DELETE FROM classified_ads WHERE newspaper_name=? AND source=? AND date_published=?`,
+    [NEWSPAPER, source, isoDate(publishDate)]
   );
   let inserted = 0, skipped = 0;
   for (const ad of ads) {
@@ -688,11 +738,11 @@ async function saveAds(ads, publishDate) {
         INSERT IGNORE INTO classified_ads
           (date_published,day_published,category,sub_category,title,description,
            location,price,size_area,phone,whatsapp,email,source,status,newspaper_name,scraped_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'scraper','active',?,NOW())
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,NOW())
       `, [
         ad.date_published, ad.day_published, ad.category, ad.sub_category,
         ad.title, ad.description, ad.location, ad.price, ad.size_area,
-        ad.phone, '', ad.email || '', ad.newspaper_name,
+        ad.phone, '', ad.email || '', ad.source || source, ad.newspaper_name,
       ]);
       r.affectedRows > 0 ? inserted++ : skipped++;
     } catch (e) { console.error('[DC] Row:', e.message); skipped++; }
@@ -1001,4 +1051,7 @@ if (require.main === module) {
     .catch(e => { console.error('[DC] Fatal:', e.message); process.exit(1); });
 }
 
-module.exports = { scrapeAndSave, scrapeCurrentWeek, getCurrentWeekDatesIST, isoDate };
+module.exports = {
+  scrapeAndSave, scrapeCurrentWeek, getCurrentWeekDatesIST, isoDate,
+  processUploadedClassifiedsImage, processAndSaveUploadedImage,
+};
