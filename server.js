@@ -1,6 +1,8 @@
 // server.js — ClassifiedsDesk backend
 require('dotenv').config();
 const path    = require('path');
+const os      = require('os');
+const fs      = require('fs');
 const express = require('express');
 const mysql   = require('mysql2/promise');
 const cors    = require('cors');
@@ -8,7 +10,10 @@ const cron    = require('node-cron');
 const multer  = require('multer');
 
 // ── FIX: destructure named exports from new dc_scraper ────────────────────
-const { scrapeAndSave, scrapeCurrentWeek } = require('./dc_scraper');
+const {
+  scrapeAndSave, scrapeCurrentWeek,
+  processAndSaveUploadedImage, // NEW: manual classifieds-image upload path
+} = require('./dc_scraper');
 const parsePdfAndSave = require('./pdfParser');
 
 const app = express();
@@ -459,6 +464,40 @@ app.post('/upload-pdf', upload.single('pdf'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No PDF uploaded' });
   const result = await parsePdfAndSave(req.file.buffer);
   res.json(result);
+});
+
+// ── POST /upload-image — NEW: manual classifieds photo/screenshot upload ──
+// For when the automated epaper scrape misses a page (resolution issues,
+// page-numbering drift, etc.) — a person can instead upload a clean photo
+// or screenshot of just the classifieds section directly. Runs the same
+// Groq vision extraction/verification pipeline as the scraper, tagged
+// source='pdf' (matches the classified_ads.source ENUM already in use for
+// non-scraper, non-seller ads).
+//
+// multer here uses memoryStorage (req.file.buffer, not req.file.path), but
+// dc_scraper's Groq calls read from a file path — so we bridge by writing
+// the buffer to a short-lived temp file, then clean it up afterward.
+//
+// form-data fields:
+//   image  — the file (required)
+//   date   — YYYY-MM-DD (optional, defaults to today IST)
+app.post('/upload-image', upload.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+
+  const targetDate = req.body.date ? new Date(req.body.date) : new Date(todayIST());
+  const ext        = path.extname(req.file.originalname || '') || '.jpg';
+  const tmpPath     = path.join(os.tmpdir(), `upload_${Date.now()}${ext}`);
+
+  try {
+    fs.writeFileSync(tmpPath, req.file.buffer);
+    const result = await processAndSaveUploadedImage(tmpPath, targetDate);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('[Upload] Failed:', e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    fs.unlink(tmpPath, () => {}); // best-effort temp file cleanup
+  }
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────
