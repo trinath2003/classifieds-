@@ -525,8 +525,8 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
 // verification pass as the automated scraper.
 //
 // Returns the built ad objects (does not save to DB — call saveAds
-// yourself with source='pdf_import' or similar, or use
-// processAndSaveUploadedImage below for a one-call version).
+// yourself with source='pdf' (matches the classified_ads.source ENUM in
+// server.js), or use processAndSaveUploadedImage below for one call).
 async function processUploadedClassifiedsImage(imagePath, targetDate) {
   if (!fs.existsSync(imagePath)) {
     throw new Error(`Uploaded image not found at ${imagePath}`);
@@ -544,7 +544,7 @@ async function processUploadedClassifiedsImage(imagePath, targetDate) {
   if (rawAds.length === 0) return [];
 
   const verifiedAds = await crossVerifyAds(rawAds, dateStr, imagePath);
-  const ads = buildAds(verifiedAds, targetDate, 'pdf_import');
+  const ads = buildAds(verifiedAds, targetDate, 'pdf');
   console.log(`[DC] Manual upload: ${ads.length} verified classified ads`);
   return ads;
 }
@@ -553,7 +553,7 @@ async function processUploadedClassifiedsImage(imagePath, targetDate) {
 // scrapeAndSave returns so both paths can share the same summary UI.
 async function processAndSaveUploadedImage(imagePath, targetDate) {
   const ads    = await processUploadedClassifiedsImage(imagePath, targetDate);
-  const result = await saveAds(ads, targetDate, 'pdf_import');
+  const result = await saveAds(ads, targetDate, 'pdf');
   console.log(`[DC] Manual upload ✓ ${isoDate(targetDate)}: inserted=${result.inserted} total=${ads.length}`);
   return { date: isoDate(targetDate), day: dayName(targetDate), ...result, total: ads.length };
 }
