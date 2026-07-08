@@ -214,6 +214,7 @@ Return ONLY a valid JSON array (no markdown, no explanation, no page-analysis na
   "phone": "ALL phone numbers printed for this ad, in the order they appear, separated by ' / ' (e.g. '9642604449' or '9949518060 / 9177545524') — many ads list 2 or more numbers, capture every one, or empty string if none",
   "email": "email address exactly as printed, or empty string",
   "price": "price if mentioned or Not mentioned",
+  "size_area": "area/size if mentioned, with unit exactly as printed (e.g. '8500 sft', '800 sq.ft', '2400 Sft', '11ft X 11Ft') or 'Not mentioned'",
   "location": "area/locality in Hyderabad or empty string",
   "category": "Property | Jobs | Automotive | Matrimonial | Education | Tender | Notice | Other",
   "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | Tender Notice | Public Notice | General",
@@ -287,6 +288,7 @@ Return ONLY a valid JSON array, same schema as before:
   "phone": "ALL phone numbers printed for this ad, in the order they appear, separated by ' / ' (e.g. '9642604449' or '9949518060 / 9177545524') — many ads list 2 or more numbers, capture every one, or empty string if none",
   "email": "email address exactly as printed, or empty string",
   "price": "price if mentioned or Not mentioned",
+  "size_area": "area/size if mentioned, with unit exactly as printed (e.g. '8500 sft', '800 sq.ft', '2400 Sft', '11ft X 11Ft') or 'Not mentioned'",
   "location": "area/locality in Hyderabad or empty string",
   "category": "Property | Jobs | Automotive | Matrimonial | Education | Tender | Notice | Other",
   "sub_category": "For Sale | For Rent | PG / Hostel | Full-time | Part-time | Used vehicle | Bride Sought | Groom Sought | Alliance | Tender Notice | Public Notice | General",
@@ -493,6 +495,7 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       `Return ONLY a valid JSON array. Same schema, drop invalid items:`,
       `[{"title":"corrected title","description":"corrected English description",`,
       ` "phone":"all numbers for this ad separated by ' / ', or empty","email":"email exactly as printed or empty","price":"Rs.X L or Not mentioned",`,
+      ` "size_area":"area/size with unit exactly as printed, e.g. '8500 sft', or Not mentioned",`,
       ` "location":"Hyderabad area or empty",`,
       ` "category":"Property|Jobs|Automotive|Matrimonial|Education|Tender|Notice|Other",`,
       ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|Tender Notice|Public Notice|General",`,
@@ -567,17 +570,46 @@ const HYD_LOCALITIES = [
   'Nanakramguda','Raidurg','Shamshabad','Shamirpet','Patancheru','Sangareddy',
   'Beeramguda','Bowenpally','Malkajgiri','Alwal','Yapral','Nacharam',
   'Hayathnagar','Vanasthalipuram','Kothapet','Moosapet','Chintal','SR Nagar',
+  // Added after seeing these areas dropped from real classified ads
+  // (industrial/commercial zones and older-city areas, not just the
+  // usual residential-suburb list above):
+  'Medchal','Mir Alam Mandi','Chikkadpally','Himayatnagar','Parklane',
+  'Sainikpuri','Ecil','Khajaguda','Thokatta','Kutbiguda','Kachiguda',
+  'Malakpet','Saleem Nagar','Narayanaguda','Tilak Road','Khairathabad',
+  'Ramkote','Raj Mohalla','Nimboliadda','Suryanagar','Mallapur',
 ];
 
 // Categories the model may now emit (Education/Tender/Notice) get mapped
 // back onto the DB's existing category set so we don't break any UI/enum
 // that only expects Property | Jobs | Automotive | Matrimonial | Other.
 // The original, more specific category is kept in sub_category context.
+//
+// Case-insensitive + synonym-aware: the old version only matched the exact
+// strings 'Property'/'Jobs'/'Automotive'/'Matrimonial' and silently sent
+// everything else (including things the model reasonably called
+// "Industrial", "Rental", "Commercial", "Recruitment") to 'Other' — which
+// is why a clearly-property listing like an industrial shed was showing
+// up uncategorized.
 function normalizeCategory(cat) {
-  const c = String(cat || '').trim();
-  const known = ['Property', 'Jobs', 'Automotive', 'Matrimonial'];
-  if (known.includes(c)) return c;
-  if (c === 'Education' || c === 'Tender' || c === 'Notice') return 'Other';
+  const c = String(cat || '').trim().toLowerCase();
+  if (!c) return 'Other';
+
+  const propertySynonyms = [
+    'property', 'rental', 'rentals', 'real estate', 'commercial',
+    'industrial', 'industrial shed', 'shed', 'for rent', 'for sale',
+    'pg / hostel', 'pg/hostel',
+  ];
+  const jobsSynonyms = [
+    'jobs', 'job', 'recruitment', 'situation vacant', 'situations vacant',
+    'wanted', 'vacancy', 'vacancies',
+  ];
+  const automotiveSynonyms = ['automotive', 'vehicle', 'vehicles', 'used vehicle'];
+  const matrimonialSynonyms = ['matrimonial', 'bride sought', 'groom sought', 'alliance'];
+
+  if (propertySynonyms.includes(c)) return 'Property';
+  if (jobsSynonyms.includes(c)) return 'Jobs';
+  if (automotiveSynonyms.includes(c)) return 'Automotive';
+  if (matrimonialSynonyms.includes(c)) return 'Matrimonial';
   return 'Other';
 }
 
@@ -644,26 +676,68 @@ function buildAds(verifiedAds, publishDate, source = 'scraper') {
   // This version scans the raw string for every individual number
   // (mobile or landline) using bounded patterns, so numbers next to each
   // other never merge, and returns all of them joined by ' / '.
-  function cleanPhone(p) {
-    if (!p) return '';
-    const text = String(p);
-
-    // Exactly 10 digits starting 6-9, bounded so it can't swallow a
-    // neighboring number even when separated by just a space.
+  // Fixes two bugs from the old single-number implementation:
+  //  1. It used to strip ALL non-digits from the whole phone string first,
+  //     concatenating every number together, then took only the LAST 10
+  //     digits — so an ad like "9949518060 / 9177545524" silently lost the
+  //     first number, and if that concatenated tail didn't start with 6-9
+  //     the whole thing came back empty even though real numbers were there.
+  //  2. It only accepted a result starting 6-9 (mobile), so any ad with a
+  //     landline-only contact (e.g. "040-23554849") always returned '' —
+  //     "not detecting the number" even though one was clearly printed.
+  // This version scans the raw string for every individual number
+  // (mobile or landline) using bounded patterns, so numbers next to each
+  // other never merge, and returns all of them joined by ' / '.
+  //
+  // Also now takes the full ad description as a fallback source: if the
+  // model's dedicated "phone" field came back empty (which happens — the
+  // field is a judgment call by the vision model, not guaranteed), but the
+  // number is sitting right there in the description text it already
+  // transcribed correctly, we still recover it instead of losing it.
+  function extractPhoneNumbers(text) {
+    if (!text) return [];
     const MOBILE_RE = /(?:\+?91[-\s]?)?\b0?([6-9]\d{9})\b/g;
-    // Landline: leading 0 + 2-4 digit STD code + separator + 6-8 digit local.
     const LANDLINE_RE = /\b0\d{2,4}[-\s]\d{6,8}\b/g;
-
-    const found = []; // {index, number} so we can restore original left-to-right order
+    const found = [];
     let m;
     MOBILE_RE.lastIndex = 0;
     while ((m = MOBILE_RE.exec(text)) !== null) found.push({ index: m.index, number: m[1] });
     LANDLINE_RE.lastIndex = 0;
     while ((m = LANDLINE_RE.exec(text)) !== null) found.push({ index: m.index, number: m[0].replace(/[\s-]/g, '') });
-
     found.sort((a, b) => a.index - b.index);
-    const numbers = found.map(f => f.number);
-    return [...new Set(numbers)].join(' / ');
+    return found.map(f => f.number);
+  }
+
+  function cleanPhone(p, description) {
+    const fromField = extractPhoneNumbers(String(p || ''));
+    const combined = fromField.length > 0 ? fromField : extractPhoneNumbers(String(description || ''));
+    return [...new Set(combined)].join(' / ');
+  }
+
+  // Same idea as cleanPhone: the model's "size_area" field is a judgment
+  // call, so if it comes back blank/"Not mentioned" but the description
+  // clearly states a size (sft, sq.ft, ft x ft, acres, etc.), recover it
+  // from the text directly instead of losing it.
+  function extractSizeArea(text) {
+    if (!text) return '';
+    const patterns = [
+      /\b\d{2,6}(?:\.\d+)?\s*-?\s*\d{0,6}\s*(?:sft|sq\.?\s?ft\.?|sq\.?\s?feet|sqft)\b/i, // "8500 sft", "800 sq.ft"
+      /\b\d{1,4}\s*-\s*\d{1,4}\s*(?:sft|sq\.?\s?ft\.?|sqft)\b/i, // "400, 600 Sft" style ranges caught separately below
+      /\b\d{1,3}\s*(?:ft|feet)\s*[xX]\s*\d{1,3}\s*(?:ft|feet)?\b/i, // "11ft X 11Ft"
+      /\b\d{1,4}(?:\.\d+)?\s*(?:acres?|guntas?|yards?|sq\.?\s?yards?|sq\.?\s?m|sq\.?\s?meters?)\b/i,
+    ];
+    for (const re of patterns) {
+      const m = text.match(re);
+      if (m) return m[0].trim();
+    }
+    return '';
+  }
+
+  function cleanSizeArea(s, description) {
+    const field = String(s || '').trim();
+    if (field && field.toLowerCase() !== 'not mentioned' && field.toLowerCase() !== 'n/a') return field;
+    const fromDesc = extractSizeArea(String(description || ''));
+    return fromDesc || 'Not mentioned';
   }
 
   function cleanEmail(e) {
@@ -714,7 +788,7 @@ function buildAds(verifiedAds, publishDate, source = 'scraper') {
       return true;
     })
     .filter(a => {
-      const phoneRaw = cleanPhone(a.phone);
+      const phoneRaw = cleanPhone(a.phone, a.description);
       const emailRaw = cleanEmail(a.email);
       if (isHollowAd(a, phoneRaw, emailRaw)) { droppedHollow++; return false; }
       return true;
@@ -734,8 +808,8 @@ function buildAds(verifiedAds, publishDate, source = 'scraper') {
         description:    String(a.description || '').trim(),
         location:       cleanLocation(a.location || '', a.description || ''),
         price:          a.price     || 'Not mentioned',
-        size_area:      a.size_area || 'Not mentioned',
-        phone:          cleanPhone(a.phone),
+        size_area:      cleanSizeArea(a.size_area, a.description),
+        phone:          cleanPhone(a.phone, a.description),
         email:          cleanEmail(a.email),
         confidence:     a.confidence || 'Medium',
         source, newspaper_name: NEWSPAPER,
