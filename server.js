@@ -37,6 +37,21 @@ const db = process.env.MYSQL_URL
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// ── Admin auth (for bulk/CSV import) ────────────────────────────────────────
+// Set ADMIN_KEY in your environment (Railway → Variables) in production —
+// this MUST match the ADMIN_PASSCODE in index.html's <script> for the CSV
+// import button to work. Falls back to a shared default so it works out of
+// the box; change both if you want this to actually be private.
+const ADMIN_KEY = process.env.ADMIN_KEY || 'dc-admin-2026';
+
+function requireAdmin(req, res, next) {
+  const key = req.header('x-admin-key');
+  if (!key || key !== ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized: missing or invalid admin key' });
+  }
+  next();
+}
+
 // ── IST date helper ────────────────────────────────────────────────────────
 // Railway runs UTC. Always use IST for "today" so Sunday/Monday don't get
 // missed when IST is ahead of UTC by 5h30m.
@@ -391,6 +406,64 @@ app.post('/ads', async (req, res) => {
   }
 });
 
+// ── POST /ads/bulk (admin-only CSV import) ─────────────────────────────────
+// Body: { ads: [ { category, title, subCategory, description, location,
+//                  price, sizeArea, phone, whatsapp, email,
+//                  datePublished, dayPublished, source }, ... ] }
+// Requires header: x-admin-key: <ADMIN_KEY>
+// Unlike POST /ads (seller form), phone is NOT required here, and the
+// caller may specify source ('scraper' | 'pdf' | 'seller' — defaults to
+// 'pdf' since this endpoint exists for bulk/CSV imports).
+app.post('/ads/bulk', requireAdmin, async (req, res) => {
+  try {
+    const ads = Array.isArray(req.body.ads) ? req.body.ads : [];
+    if (!ads.length) return res.status(400).json({ error: 'No ads provided' });
+    if (ads.length > 500) return res.status(400).json({ error: 'Max 500 ads per request — split into smaller batches' });
+
+    const results = [];
+    for (const raw of ads) {
+      const category = raw.category;
+      const title    = raw.title;
+      if (!category || !title) {
+        results.push({ ok: false, error: 'category and title are required', row: raw });
+        continue;
+      }
+      const source = ['scraper', 'pdf', 'seller'].includes(raw.source) ? raw.source : 'pdf';
+      const datePublished = raw.datePublished ? toDateValue(raw.datePublished) : todayIST();
+      const dayPublished   = raw.dayPublished || dayName(datePublished);
+
+      try {
+        const [result] = await db.query(`
+          INSERT INTO classified_ads
+            (date_published, day_published, category, sub_category, title, description,
+             location, price, size_area, phone, whatsapp, email,
+             source, status, newspaper_name, scraped_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'Deccan Chronicle', NULL)
+        `, [
+          datePublished, dayPublished, category, raw.subCategory || 'General', title,
+          raw.description || '', raw.location || '', raw.price || 'Not mentioned',
+          raw.sizeArea || 'Not mentioned', raw.phone || '', raw.whatsapp || '', raw.email || '',
+          source,
+        ]);
+        results.push({ ok: true, id: result.insertId });
+      } catch (e) {
+        results.push({ ok: false, error: e.message, row: raw });
+      }
+    }
+
+    const inserted = results.filter(r => r.ok).length;
+    res.json({
+      success: true,
+      total: ads.length,
+      inserted,
+      failed: ads.length - inserted,
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /days ──────────────────────────────────────────────────────────────
 app.get('/days', async (req, res) => {
   try {
@@ -513,4 +586,3 @@ function startServer(port) {
 
 startServer(Number(process.env.PORT) || 8080);
 initDB().catch(e => console.error('[DB] Fatal after all retries:', e.code, e.message));
-
