@@ -211,7 +211,7 @@ Return ONLY a valid JSON array (no markdown, no explanation, no page-analysis na
 [{
   "title": "first line or heading of the individual ad — include a person's name here if one is printed",
   "description": "complete full text of the ad, fragments merged, OCR-corrected",
-  "phone": "10-digit number or empty string",
+  "phone": "ALL phone numbers printed for this ad, in the order they appear, separated by ' / ' (e.g. '9642604449' or '9949518060 / 9177545524') — many ads list 2 or more numbers, capture every one, or empty string if none",
   "email": "email address exactly as printed, or empty string",
   "price": "price if mentioned or Not mentioned",
   "location": "area/locality in Hyderabad or empty string",
@@ -284,7 +284,7 @@ Return ONLY a valid JSON array, same schema as before:
 [{
   "title": "first line or heading of the individual ad — include a person's name here if one is printed",
   "description": "complete full text of the ad, fragments merged, OCR-corrected",
-  "phone": "10-digit number or empty string",
+  "phone": "ALL phone numbers printed for this ad, in the order they appear, separated by ' / ' (e.g. '9642604449' or '9949518060 / 9177545524') — many ads list 2 or more numbers, capture every one, or empty string if none",
   "email": "email address exactly as printed, or empty string",
   "price": "price if mentioned or Not mentioned",
   "location": "area/locality in Hyderabad or empty string",
@@ -474,7 +474,7 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       `- "Regured" -> "Required"`,
       `- Symbols like cent sign or section sign mixed in words -> remove them`,
       `- "0" vs "O", "1" vs "l" -> use image context to decide`,
-      `- Verify phone numbers digit-by-digit against the image; if a number can't be confirmed, leave phone empty rather than guessing.`,
+      `- Verify EVERY phone number digit-by-digit against the image — if the ad lists 2+ numbers, keep all of them separated by ' / ', don't collapse to just one. If a specific number can't be confirmed, drop only that number rather than guessing.`,
       `- Verify any email address character-by-character against the image; if it can't be confirmed, leave email empty rather than guessing.`,
       `- If an entry is actually two ads merged together, split them into separate array items.`,
       `- If an entry is a fragment of a larger ad that continues on an adjacent line, merge it back into one item.`,
@@ -492,7 +492,7 @@ async function crossVerifyAds(rawAds, dateStr, imagePath) {
       ``,
       `Return ONLY a valid JSON array. Same schema, drop invalid items:`,
       `[{"title":"corrected title","description":"corrected English description",`,
-      ` "phone":"10 digits or empty","email":"email exactly as printed or empty","price":"Rs.X L or Not mentioned",`,
+      ` "phone":"all numbers for this ad separated by ' / ', or empty","email":"email exactly as printed or empty","price":"Rs.X L or Not mentioned",`,
       ` "location":"Hyderabad area or empty",`,
       ` "category":"Property|Jobs|Automotive|Matrimonial|Education|Tender|Notice|Other",`,
       ` "sub_category":"For Sale|For Rent|PG / Hostel|Full-time|Part-time|Used vehicle|Bride Sought|Groom Sought|Alliance|Tender Notice|Public Notice|General",`,
@@ -632,14 +632,38 @@ function buildAds(verifiedAds, publishDate, source = 'scraper') {
   const today  = isoDate(publishDate);
   const dayPub = dayName(publishDate);
 
+  // Fixes two bugs from the old single-number implementation:
+  //  1. It used to strip ALL non-digits from the whole phone string first,
+  //     concatenating every number together, then took only the LAST 10
+  //     digits — so an ad like "9949518060 / 9177545524" silently lost the
+  //     first number, and if that concatenated tail didn't start with 6-9
+  //     the whole thing came back empty even though real numbers were there.
+  //  2. It only accepted a result starting 6-9 (mobile), so any ad with a
+  //     landline-only contact (e.g. "040-23554849") always returned '' —
+  //     "not detecting the number" even though one was clearly printed.
+  // This version scans the raw string for every individual number
+  // (mobile or landline) using bounded patterns, so numbers next to each
+  // other never merge, and returns all of them joined by ' / '.
   function cleanPhone(p) {
     if (!p) return '';
-    const d = String(p).replace(/\D/g, '');
-    if (d.length >= 10) {
-      const num = d.slice(-10);
-      return /^[6-9]\d{9}$/.test(num) ? num : '';
-    }
-    return '';
+    const text = String(p);
+
+    // Exactly 10 digits starting 6-9, bounded so it can't swallow a
+    // neighboring number even when separated by just a space.
+    const MOBILE_RE = /(?:\+?91[-\s]?)?\b0?([6-9]\d{9})\b/g;
+    // Landline: leading 0 + 2-4 digit STD code + separator + 6-8 digit local.
+    const LANDLINE_RE = /\b0\d{2,4}[-\s]\d{6,8}\b/g;
+
+    const found = []; // {index, number} so we can restore original left-to-right order
+    let m;
+    MOBILE_RE.lastIndex = 0;
+    while ((m = MOBILE_RE.exec(text)) !== null) found.push({ index: m.index, number: m[1] });
+    LANDLINE_RE.lastIndex = 0;
+    while ((m = LANDLINE_RE.exec(text)) !== null) found.push({ index: m.index, number: m[0].replace(/[\s-]/g, '') });
+
+    found.sort((a, b) => a.index - b.index);
+    const numbers = found.map(f => f.number);
+    return [...new Set(numbers)].join(' / ');
   }
 
   function cleanEmail(e) {
