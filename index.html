@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -33,6 +34,27 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .postbtn{background:var(--tx);color:#111;border:none;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
 .postbtn:hover{background:#ccc}
+
+/* ── admin controls ── */
+.adminbtn{background:var(--bg3);color:var(--tx2);border:1px solid var(--bd);border-radius:9px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px}
+.adminbtn:hover{border-color:var(--tx2)}
+.adminbtn.active{background:var(--greenl);color:var(--green);border-color:#1D9E7533}
+.csvbtn{background:var(--amberl);color:var(--amber);border:1px solid #63380644;border-radius:9px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;display:none;align-items:center;gap:5px}
+.csvbtn:hover{background:#4a2e13}
+.csvbtn.show{display:flex}
+.csv-toast{
+  position:fixed;bottom:16px;right:16px;z-index:100;
+  background:var(--bg2);border:1px solid var(--bd);border-radius:12px;
+  padding:14px 16px;min-width:260px;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.4);
+  display:none
+}
+.csv-toast.show{display:block}
+.csv-toast h4{font-size:12px;font-weight:700;color:var(--tx);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.csv-toast .cts{font-size:11px;color:var(--tx2);line-height:1.6}
+.csv-toast .ctbar{height:5px;background:var(--bg4);border-radius:99px;margin:8px 0;overflow:hidden}
+.csv-toast .ctfill{height:100%;background:var(--amber);width:0%;transition:width .2s}
+.csv-toast.done .ctfill{background:var(--green)}
+.csv-toast .ctclose{background:none;border:none;color:var(--tx3);cursor:pointer;font-size:14px;line-height:1}
 
 /* ── layout ── */
 .layout{display:grid;grid-template-columns:200px 1fr;align-items:start}
@@ -170,6 +192,19 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
 .okbox h3{font-size:16px;font-weight:700;color:var(--tx);margin-bottom:5px}
 .okbox p{font-size:12px;color:var(--tx2);margin-bottom:16px}
 .viewbtn{background:var(--green);color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:12px;font-weight:700;cursor:pointer}
+
+/* ── admin login modal ── */
+.modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:200}
+.modal-ov.show{display:flex}
+.modal-box{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;padding:22px;width:100%;max-width:320px}
+.modal-box h3{font-size:14px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.modal-box input{width:100%;border:1px solid var(--bd);border-radius:8px;padding:9px 10px;font-size:12px;outline:none;color:var(--tx);background:var(--bg3);margin-bottom:10px}
+.modal-box input:focus{border-color:var(--green)}
+.modal-actions{display:flex;gap:8px}
+.modal-actions button{flex:1;border:none;border-radius:8px;padding:9px;font-size:12px;font-weight:700;cursor:pointer}
+.modal-cancel{background:var(--bg3);color:var(--tx2)}
+.modal-submit{background:var(--green);color:#fff}
+.modal-err{font-size:11px;color:var(--red);margin:-4px 0 8px;display:none}
 </style>
 </head>
 <body>
@@ -183,6 +218,15 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
       <input type="text" id="srch" placeholder="Search ads…" oninput="onSearch(this.value)"/>
     </div>
     <div class="live"><div class="ldot" id="ldot"></div><span id="live-label">Loading…</span></div>
+
+    <!-- Admin-only CSV import (hidden unless admin mode is on) -->
+    <button class="csvbtn" id="csvBtn" onclick="document.getElementById('csvFile').click()">📁 Upload CSV</button>
+    <input type="file" id="csvFile" accept=".csv" style="display:none" onchange="handleCsvUpload(this.files[0])"/>
+
+    <!-- Admin toggle -->
+    <button class="adminbtn" id="adminBtn" onclick="onAdminBtnClick()" title="Admin sign in">🔒 Admin</button>
+
+    <!-- Public post-ad button, always visible -->
     <button class="postbtn" onclick="goPage('pg-form')">+ Post ad</button>
   </div>
 
@@ -323,16 +367,44 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
   </div>
 </div>
 
+<!-- ── ADMIN LOGIN MODAL ─────────────────────────────────────────────── -->
+<div class="modal-ov" id="adminModal">
+  <div class="modal-box">
+    <h3>🔒 Admin sign in</h3>
+    <input type="password" id="adminPass" placeholder="Enter admin passcode" onkeydown="if(event.key==='Enter')confirmAdminLogin()"/>
+    <div class="modal-err" id="adminErr">Incorrect passcode.</div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeAdminModal()">Cancel</button>
+      <button class="modal-submit" onclick="confirmAdminLogin()">Sign in</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── CSV UPLOAD PROGRESS TOAST ─────────────────────────────────────── -->
+<div class="csv-toast" id="csvToast">
+  <h4><span id="csvToastTitle">Uploading CSV…</span><button class="ctclose" onclick="closeCsvToast()">✕</button></h4>
+  <div class="ctbar"><div class="ctfill" id="csvFill"></div></div>
+  <div class="cts" id="csvStatus">Preparing…</div>
+</div>
+
 <script>
 // ── Config ─────────────────────────────────────────────────────────────────
 const API = ''; // same-origin — works on Railway and locally
 const PER = 24;
+// NOTE: this is a client-side-only gate for showing/hiding the CSV import
+// control in the UI. It is convenient for a small internal tool, but it is
+// NOT real security — anyone who reads the page source can find the
+// passcode. If admin actions need to be protected server-side too, enforce
+// an auth check on the /ads/bulk (or /ads) endpoint as well.
+const ADMIN_PASSCODE = 'dc-admin-2026';
+
 // ── State ──────────────────────────────────────────────────────────────────
 let state = {
   cat: '', sub: '', src: '', day: '', date: '', q: '',
   sort: 'newest', page: 1
 };
 let scraping = false;
+let isAdmin = (localStorage.getItem('cd_admin') === '1');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s){ var d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
@@ -658,7 +730,7 @@ function goPage(id){
   window.scrollTo(0,0);
 }
 
-// ── Post ad form ───────────────────────────────────────────────────────────
+// ── Post ad form (public) ──────────────────────────────────────────────────
 async function submitAd(){
   var cat   = document.getElementById('f-cat').value;
   var title = document.getElementById('f-title').value.trim();
@@ -684,6 +756,7 @@ async function submitAd(){
         phone:       phone,
         whatsapp:    document.getElementById('f-wa').value,
         email:       document.getElementById('f-email').value,
+        source:      'seller',
       })
     });
     var data = await res.json();
@@ -698,7 +771,188 @@ async function submitAd(){
   }
 }
 
+// ── Admin sign-in / sign-out ────────────────────────────────────────────────
+function onAdminBtnClick(){
+  if(isAdmin){
+    if(confirm('Sign out of admin mode?')){
+      isAdmin=false;
+      localStorage.removeItem('cd_admin');
+      updateAdminUI();
+    }
+    return;
+  }
+  document.getElementById('adminPass').value='';
+  document.getElementById('adminErr').style.display='none';
+  document.getElementById('adminModal').classList.add('show');
+  setTimeout(function(){ document.getElementById('adminPass').focus(); },50);
+}
+function closeAdminModal(){
+  document.getElementById('adminModal').classList.remove('show');
+}
+function confirmAdminLogin(){
+  var pass = document.getElementById('adminPass').value;
+  if(pass===ADMIN_PASSCODE){
+    isAdmin=true;
+    localStorage.setItem('cd_admin','1');
+    closeAdminModal();
+    updateAdminUI();
+  } else {
+    document.getElementById('adminErr').style.display='block';
+  }
+}
+function updateAdminUI(){
+  var adminBtn=document.getElementById('adminBtn');
+  var csvBtn=document.getElementById('csvBtn');
+  if(isAdmin){
+    adminBtn.textContent='🔓 Admin (on)';
+    adminBtn.classList.add('active');
+    csvBtn.classList.add('show');
+  } else {
+    adminBtn.textContent='🔒 Admin';
+    adminBtn.classList.remove('active');
+    csvBtn.classList.remove('show');
+  }
+}
+
+// ── CSV import (admin only) ─────────────────────────────────────────────────
+// Expected CSV header (case-insensitive, order doesn't matter). Recognised
+// columns: category, subCategory, title, description, location, price,
+// sizeArea, phone, whatsapp, email, datePublished, dayPublished, source.
+// Only "category" and "title" are required per row.
+function parseCSV(text){
+  // Minimal RFC4180-ish parser: handles quoted fields, escaped quotes, commas/newlines inside quotes.
+  var rows=[], row=[], field='', inQuotes=false;
+  for(var i=0;i<text.length;i++){
+    var c=text[i], n=text[i+1];
+    if(inQuotes){
+      if(c==='"' && n==='"'){ field+='"'; i++; }
+      else if(c==='"'){ inQuotes=false; }
+      else { field+=c; }
+    } else {
+      if(c==='"'){ inQuotes=true; }
+      else if(c===','){ row.push(field); field=''; }
+      else if(c==='\r'){ /* skip */ }
+      else if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else { field+=c; }
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  // drop trailing empty rows
+  rows = rows.filter(function(r){ return r.length>1 || (r.length===1 && r[0].trim()!==''); });
+  if(!rows.length) return [];
+  var headers = rows[0].map(function(h){ return h.trim().toLowerCase(); });
+  var out=[];
+  for(var r=1;r<rows.length;r++){
+    var obj={};
+    headers.forEach(function(h,idx){ obj[h]=(rows[r][idx]||'').trim(); });
+    out.push(obj);
+  }
+  return out;
+}
+
+function mapRowToAd(row){
+  function get(){
+    for(var i=0;i<arguments.length;i++){
+      var k=arguments[i];
+      if(row[k]!==undefined && row[k]!=='') return row[k];
+    }
+    return '';
+  }
+  return {
+    category:     get('category'),
+    subCategory:  get('subcategory','sub_category','sub-category'),
+    title:        get('title','ad title','adtitle'),
+    description:  get('description','desc'),
+    location:     get('location'),
+    price:        get('price'),
+    sizeArea:     get('sizearea','size_area','size / area','size'),
+    phone:        get('phone'),
+    whatsapp:     get('whatsapp'),
+    email:        get('email'),
+    datePublished:get('datepublished','date_published','date'),
+    dayPublished: get('daypublished','day_published','day'),
+    source:       get('source') || 'pdf'
+  };
+}
+
+function handleCsvUpload(file){
+  if(!file) return;
+  if(!isAdmin){ alert('Admin sign-in required to import a CSV.'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e){
+    var rows;
+    try{ rows = parseCSV(e.target.result); }
+    catch(err){ alert('Could not parse CSV: '+err.message); return; }
+    if(!rows.length){ alert('No rows found in that CSV.'); return; }
+    bulkUploadAds(rows.map(mapRowToAd));
+  };
+  reader.onerror = function(){ alert('Could not read the file.'); };
+  reader.readAsText(file);
+  // reset the input so selecting the same file again re-triggers onchange
+  document.getElementById('csvFile').value='';
+}
+
+var CSV_BATCH_SIZE = 25; // rows per /ads/bulk request
+
+async function bulkUploadAds(ads){
+  var toast=document.getElementById('csvToast');
+  var fill=document.getElementById('csvFill');
+  var status=document.getElementById('csvStatus');
+  var title=document.getElementById('csvToastTitle');
+  toast.classList.remove('done');
+  toast.classList.add('show');
+  title.textContent='Uploading CSV…';
+
+  var total=ads.length, done=0, okCount=0, failCount=0, failMsgs=[];
+
+  for(var i=0;i<ads.length;i+=CSV_BATCH_SIZE){
+    var batch = ads.slice(i, i+CSV_BATCH_SIZE);
+    try{
+      var res = await fetch(API+'/ads/bulk', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-admin-key':ADMIN_PASSCODE},
+        body: JSON.stringify({ ads: batch })
+      });
+      var data = await res.json().catch(function(){ return {}; });
+      if(res.status===401){
+        toast.classList.add('done');
+        title.textContent='Import failed';
+        status.innerHTML = '<span style="color:var(--red)">Admin key rejected by server. Make sure ADMIN_KEY on the server matches the admin passcode used here.</span>';
+        return;
+      }
+      if(!res.ok) throw new Error(data.error||('HTTP '+res.status));
+      (data.results||[]).forEach(function(r,idx){
+        if(r.ok) okCount++;
+        else { failCount++; failMsgs.push('Row '+(i+idx+2)+': '+(r.error||'failed')); }
+      });
+      done += batch.length;
+    } catch(err){
+      failCount += batch.length;
+      done += batch.length;
+      failMsgs.push('Batch at row '+(i+2)+': '+err.message);
+    }
+    updateCsvProgress(done,total,okCount,failCount,fill,status);
+  }
+
+  toast.classList.add('done');
+  title.textContent='Import complete';
+  status.innerHTML = okCount+' added, '+failCount+' failed of '+total+' rows.'+
+    (failMsgs.length ? '<br><span style="color:var(--red)">'+esc(failMsgs.slice(0,5).join(' · '))+(failMsgs.length>5?' …':'')+'</span>' : '');
+  loadStats(); loadDays(); reload();
+}
+
+function updateCsvProgress(done,total,okCount,failCount,fill,status){
+  var pct = Math.round(done/total*100);
+  fill.style.width=pct+'%';
+  status.textContent = 'Processed '+done+' / '+total+' · '+okCount+' ok · '+failCount+' failed';
+}
+
+function closeCsvToast(){
+  document.getElementById('csvToast').classList.remove('show');
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────
+updateAdminUI();
 loadStats();
 loadDays();
 reload();
