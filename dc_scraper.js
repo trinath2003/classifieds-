@@ -1118,6 +1118,167 @@ async function scrapeAndSave(dateFrom, dateTo) {
   return summary;
 }
 
+// ── CSV IMPORT PATH ─────────────────────────────────────────────────────
+// For importing a CSV of already-transcribed ads (e.g. a manually-compiled
+// spreadsheet, or a bulk export from somewhere else) — bypasses Groq
+// entirely, but runs every row through the SAME buildAds() cleaning/
+// fallback logic as the scraper and manual-upload paths (cleanPhone,
+// cleanSizeArea, cleanLocation, normalizeCategory), so CSV rows get the
+// exact same robustness: multiple phone numbers recovered from the
+// description, size/area recovered via regex if the column is blank, etc.
+//
+// THE DATE BUG THIS FIXES: previously there was no CSV path in this file
+// at all, so whatever ad-hoc importer was in use just inserted a CSV's
+// "date" column verbatim — meaning if the CSV was generated once (e.g. for
+// Wednesday's edition) and re-imported later, every row stayed stamped
+// Wednesday no matter what day it actually was. This importer treats the
+// CSV's date column as the ad's PUBLISHED date (the edition it appeared
+// in) — which is correct, that shouldn't silently become "today" — but if
+// a row's date is missing or unparseable, it now falls back to today's
+// date instead of silently defaulting to some other fixed value, and each
+// distinct date in the file is grouped and saved separately so multiple
+// editions in one CSV don't collide or overwrite each other's rows.
+
+// Minimal dependency-free CSV parser (handles quoted fields containing
+// commas, newlines, and escaped "" quotes — the common cases a hand-built
+// or spreadsheet-exported CSV will use).
+function parseCSV(raw) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i], next = raw[i + 1];
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\r') { /* skip */ }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else { field += c; }
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+
+  const filtered = rows.filter(r => !(r.length === 1 && r[0] === ''));
+  if (filtered.length === 0) return [];
+  const headers = filtered[0].map(h => h.trim());
+  return filtered.slice(1).map(r => {
+    const obj = {};
+    headers.forEach((h, idx) => { obj[h] = (r[idx] || '').trim(); });
+    return obj;
+  });
+}
+
+// Parses a date column that might be "08 Jul 2026", "2026-07-08",
+// "07/08/2026", etc. Returns null (not a fallback date) if it can't be
+// parsed, so the caller can decide what "missing date" should mean rather
+// than this function silently guessing.
+function parseCSVDate(value) {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+
+  // "08 Jul 2026" / "8 July 2026"
+  const named = trimmed.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+  if (named) {
+    const d = new Date(`${named[2]} ${named[1]}, ${named[3]}`);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // ISO "2026-07-08" or with time
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // Generic fallback to whatever Date() can parse (e.g. "07/08/2026")
+  const generic = new Date(trimmed);
+  if (!isNaN(generic.getTime())) return generic;
+
+  return null;
+}
+
+// Maps one CSV row (flexible column names, since different exports of
+// this data have used "phone" vs "mobile_number", "size_area" vs "size",
+// etc.) onto the raw-ad shape buildAds() expects — same shape the Groq
+// vision extraction produces, so it goes through identical cleaning.
+function csvRowToRawAd(row) {
+  return {
+    title:        row.title || '',
+    description:  row.description || '',
+    phone:        row.phone || row.mobile_number || row.mobile || '',
+    email:        row.email || '',
+    price:        row.price || 'Not mentioned',
+    size_area:    row.size_area || row.size || row['size/area'] || 'Not mentioned',
+    location:     row.location || '',
+    category:     row.category || 'Other',
+    sub_category: row.sub_category || row['sub-category'] || 'General',
+    confidence:   row.confidence || 'Medium',
+  };
+}
+
+/**
+ * Reads a CSV file, groups rows by their resolved publish date (falling
+ * back to `defaultDate` — normally today — for any row with a missing or
+ * unparseable date column), and returns { [isoDateStr]: builtAds[] }.
+ * Does not save to DB — see processAndSaveCSV for that.
+ */
+function processCSVImport(csvPath, defaultDate = new Date()) {
+  if (!fs.existsSync(csvPath)) {
+    throw new Error(`CSV file not found at ${csvPath}`);
+  }
+  const raw = fs.readFileSync(csvPath, 'utf8');
+  const rows = parseCSV(raw);
+  console.log(`[DC] CSV import: ${rows.length} row(s) read from ${csvPath}`);
+
+  const groupedByDate = new Map(); // isoDateStr -> { date: Date, rawAds: [] }
+
+  for (const row of rows) {
+    const dateCol = row.date || row.date_published || row.ad_date || '';
+    let resolvedDate = parseCSVDate(dateCol);
+    if (!resolvedDate) {
+      if (dateCol) {
+        console.warn(`[DC] CSV row has unparseable date "${dateCol}" — falling back to ${isoDate(defaultDate)}`);
+      }
+      resolvedDate = defaultDate;
+    }
+    const key = isoDate(resolvedDate);
+    if (!groupedByDate.has(key)) groupedByDate.set(key, { date: resolvedDate, rawAds: [] });
+    groupedByDate.get(key).rawAds.push(csvRowToRawAd(row));
+  }
+
+  const result = {};
+  for (const [key, { date, rawAds }] of groupedByDate) {
+    // Runs every CSV row through the same buildAds() pipeline as the
+    // vision-extraction path — same cleanPhone/cleanSizeArea/cleanLocation/
+    // normalizeCategory fallbacks apply here too.
+    result[key] = buildAds(rawAds, date, 'pdf');
+    console.log(`[DC] CSV import: ${key} — ${rawAds.length} row(s) in -> ${result[key].length} valid ad(s) after cleaning`);
+  }
+  return result;
+}
+
+/**
+ * Convenience wrapper: import + save in one call. Saves each date group
+ * separately (saveAds only ever deletes+replaces rows for the single date
+ * it's given), so a CSV spanning multiple editions doesn't let one date's
+ * import wipe another's.
+ */
+async function processAndSaveCSV(csvPath, defaultDate = new Date()) {
+  const grouped = processCSVImport(csvPath, defaultDate);
+  const summary = [];
+  for (const [dateKey, ads] of Object.entries(grouped)) {
+    const dateObj = new Date(dateKey);
+    const result  = await saveAds(ads, dateObj, 'pdf');
+    console.log(`[DC] CSV import ✓ ${dateKey}: inserted=${result.inserted} skipped=${result.skipped} total=${ads.length}`);
+    summary.push({ date: dateKey, day: dayName(dateObj), ...result, total: ads.length });
+  }
+  return summary;
+}
+
 // ── IST-aware week helper ──────────────────────────────────────────────────
 function getCurrentWeekDatesIST() {
   const nowIST    = toIST(new Date());
@@ -1143,13 +1304,22 @@ async function scrapeCurrentWeek() {
 // ── CLI ────────────────────────────────────────────────────────────────────
 if (require.main === module) {
   const [,, a1, a2] = process.argv;
-  const cmd = a1 === '--week' ? scrapeCurrentWeek() : scrapeAndSave(a1, a2);
+  let cmd;
+  if (a1 === '--week') cmd = scrapeCurrentWeek();
+  else if (a1 === '--csv') {
+    if (!a2) { console.error('[DC] Usage: node dc_scraper.js --csv <path-to-file.csv> [YYYY-MM-DD]'); process.exit(1); }
+    const [,,, a3] = process.argv;
+    cmd = processAndSaveCSV(a2, a3 ? new Date(a3) : new Date());
+  }
+  else cmd = scrapeAndSave(a1, a2);
+
   cmd
-    .then(() => process.exit(0))
+    .then((result) => { if (Array.isArray(result)) console.table(result); process.exit(0); })
     .catch(e => { console.error('[DC] Fatal:', e.message); process.exit(1); });
 }
 
 module.exports = {
   scrapeAndSave, scrapeCurrentWeek, getCurrentWeekDatesIST, isoDate,
   processUploadedClassifiedsImage, processAndSaveUploadedImage,
+  processCSVImport, processAndSaveCSV,
 };
