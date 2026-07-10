@@ -107,6 +107,31 @@ function toDateValue(value) {
   return date.toISOString().slice(0, 10);
 }
 
+// ── Extract a phone number embedded in free text ────────────────────────────
+// Handles CSV rows (or scraped/OCR'd ads) where the phone number was only
+// ever present inside the description/title — e.g. "Please call: 9642851000"
+// — rather than in its own column. Matches Indian mobile numbers (10 digits,
+// starting 6-9), optionally prefixed with +91/91/0 and with spaces or
+// dashes in between (e.g. "+91 96428 51000", "0964-285-1000").
+function extractPhoneFromText(text) {
+  if (!text) return '';
+  const s = String(text);
+  // Look for any run of digits/spaces/dashes that, once separators are
+  // stripped, yields a plausible Indian mobile number (10 digits starting
+  // 6-9, optionally with a 0/91/+91 prefix). Grouping in the wild varies
+  // ("96428 51000", "0964-285-1000", "9642851000"), so this matches loosely
+  // and validates by stripping non-digits rather than requiring a fixed
+  // 3-3-4 split.
+  const re = /(?:\+?91[\s-]?|0)?[6-9](?:[\s-]?\d){9}/g;
+  const candidates = s.match(re) || [];
+  for (const c of candidates) {
+    const digits = c.replace(/\D/g, '');
+    const last10 = digits.slice(-10);
+    if (/^[6-9]\d{9}$/.test(last10)) return last10;
+  }
+  return '';
+}
+
 function normalizeCategory(raw) {
   const text = String(raw || '').toUpperCase();
   if (/(AUTOMOTIVE|CAR|BIKE|BIKES|VEHICLE|FOUR.?WHEELER|SUV|SEDAN|MOTORCYCLE|TWO.?WHEELER|SCOOTER|AUTO)/.test(text)) return 'Automotive';
@@ -137,7 +162,13 @@ function normalizeAd(row, sno) {
   const rawLocation = row.location     || row['Location']            || '';
   const rawPrice    = row.price        || row['Price/Details']       || '';
   const rawSize     = row.size_area    || row['Size/Area']           || '';
-  const rawPhone    = row.phone        || row['Contact']             || '';
+  // FIX: fall back to extracting a phone number from the description/title
+  // if the phone column itself is empty (common with CSV rows where the
+  // number was only ever written inline in the ad text).
+  const rawPhone    = row.phone || row['Contact']
+    || extractPhoneFromText(rawDesc)
+    || extractPhoneFromText(rawTitle)
+    || '';
 
   const datePublished = toDateValue(row.date_published || row.scraped_at);
   const dayPublished  = row.day_published || dayName(datePublished);
