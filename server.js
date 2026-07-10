@@ -1,3 +1,4 @@
+
 // server.js — ClassifiedsDesk backend
 require('dotenv').config();
 const path    = require('path');
@@ -109,6 +110,7 @@ function normalizeAd(row, sno) {
   const normalizedCat = normalizeCategory(rawCategory);
 
   return {
+    id:             row.id,
     sno,
     date_published: datePublished,
     day_published:  dayPublished,
@@ -365,7 +367,7 @@ app.get('/ads/:id', async (req, res) => {
     if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: 'Invalid id' });
     const [rows] = await db.query(`
       SELECT
-        category, sub_category, title, description,
+        id, category, sub_category, title, description,
         location, price, size_area, phone,
         whatsapp, email, source, status,
         date_published, day_published, scraped_at
@@ -374,6 +376,24 @@ app.get('/ads/:id', async (req, res) => {
     `, [id]);
     if (!rows.length) return res.status(404).json({ error: 'Ad not found' });
     res.json(normalizeAd(rows[0], id));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DELETE /ads/:id — admin-only permanent delete ──────────────────────────
+// Requires header: x-admin-key: <ADMIN_KEY>  (same key as /ads/bulk)
+app.delete('/ads/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: 'Invalid id' });
+
+    const [result] = await db.query(
+      `DELETE FROM classified_ads WHERE id = ? AND newspaper_name = 'Deccan Chronicle'`,
+      [id]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Ad not found' });
+    res.json({ success: true, id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
