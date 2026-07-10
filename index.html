@@ -291,7 +291,7 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
   <div class="detbar">
     <button class="backbtn" onclick="goPage('pg-list')">← Back</button>
     <span style="font-size:12px;color:var(--tx3)" id="det-crumb"></span>
-    <button class="deletebtn" id="det-delete-btn" onclick="deleteAd(window._currentSno)" style="display:none">🗑 Delete ad</button>
+    <button class="deletebtn" id="det-delete-btn" onclick="deleteAd(window._currentId)" style="display:none">🗑 Delete ad</button>
   </div>
   <div class="detbody">
     <div class="dcard">
@@ -500,7 +500,7 @@ function renderGrid(res){
     var ic=icoFor(a.category,a.sub_category);
     h+='<div class="card" onclick="openDet('+a.sno+')">';
     if(isAdmin){
-      h+='<button class="card-del" title="Delete ad" onclick="event.stopPropagation();deleteAd('+a.sno+')">🗑</button>';
+      h+='<button class="card-del" title="Delete ad" onclick="event.stopPropagation();deleteAd('+a.id+')">🗑</button>';
     }
     h+='<div class="card-top"><div class="cico '+ic.cl+'">'+ic.e+'</div>';
     h+='<div class="cinfo"><div class="csno">#'+a.sno+' · '+esc(a.day_published)+', '+fmt(a.date_published)+'</div>';
@@ -687,6 +687,7 @@ async function openDet(sno){
   if(!a){ alert('Could not load ad details'); return; }
 
   window._currentSno = sno;
+  window._currentId  = a.id;
   goPage('pg-detail');
   document.getElementById('det-delete-btn').style.display = isAdmin ? 'flex' : 'none';
   var ic = icoFor(a.category, a.sub_category);
@@ -735,26 +736,15 @@ async function openDet(sno){
 }
 
 // ── Delete ad (admin only) ─────────────────────────────────────────────────
-// Requires a server-side route: DELETE /ads/:sno, guarded by checking the
-// 'x-admin-key' header against process.env.ADMIN_KEY (same pattern as the
-// existing /ads/bulk import route). If your server doesn't have this route
-// yet, add something like:
-//
-//   app.delete('/ads/:sno', async (req, res) => {
-//     if (req.headers['x-admin-key'] !== process.env.ADMIN_KEY) {
-//       return res.status(401).json({ error: 'unauthorized' });
-//     }
-//     const [result] = await pool.query('DELETE FROM classified_ads WHERE sno = ?', [req.params.sno]);
-//     if (result.affectedRows === 0) return res.status(404).json({ error: 'not found' });
-//     res.json({ ok: true });
-//   });
-async function deleteAd(sno){
+// Calls DELETE /ads/:id using the ad's real database id (not the on-screen
+// #sno label, which is just a page-relative display number).
+async function deleteAd(id){
   if(!isAdmin){ alert('Admin sign-in required to delete an ad.'); return; }
-  if(!sno){ return; }
-  if(!confirm('Delete ad #'+sno+'? This cannot be undone.')) return;
+  if(!id){ return; }
+  if(!confirm('Delete this ad? This cannot be undone.')) return;
 
   try{
-    var res = await fetch(API+'/ads/'+sno, {
+    var res = await fetch(API+'/ads/'+id, {
       method:'DELETE',
       headers:{ 'x-admin-key': ADMIN_PASSCODE }
     });
