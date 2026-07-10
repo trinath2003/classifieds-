@@ -1,4 +1,3 @@
-
 // server.js — ClassifiedsDesk backend
 require('dotenv').config();
 const path    = require('path');
@@ -66,10 +65,45 @@ function dayName(d) {
   return new Date(d).toLocaleDateString('en-IN', { weekday: 'long' });
 }
 
+// ── FIX: explicit DD/MM/YYYY parsing ────────────────────────────────────────
+// The old version of this function handed ambiguous date strings straight to
+// `new Date(raw)`. JavaScript's native Date parser assumes US-style
+// MM/DD/YYYY for slash/dash-separated dates — so a CSV date written the
+// Indian way as "10/07/2026" (10 July) was silently misread as "October 7,
+// 2026" (month 10, day 07). That's not a timezone issue — it lands on a
+// completely different date (and therefore a completely different weekday,
+// e.g. Wednesday instead of Friday).
+//
+// This version explicitly handles:
+//   - YYYY-MM-DD (ISO, unambiguous — used as-is)
+//   - DD/MM/YYYY or DD-MM-YYYY (Indian format — used explicitly, never
+//     handed to the native parser)
+// and only falls back to native `Date` parsing for anything else (e.g. full
+// datetime strings from the scraper), with a safe today-IST fallback if that
+// also fails to parse.
 function toDateValue(value) {
-  const raw  = value || new Date();
+  if (!value) return todayIST();
+  const raw = String(value).trim();
+  if (!raw) return todayIST();
+
+  // ISO format: YYYY-MM-DD
+  let m = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) {
+    const [, y, mo, d] = m;
+    return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  // Indian format: DD/MM/YYYY or DD-MM-YYYY
+  m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) {
+    const [, d, mo, y] = m;
+    return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  // Fallback: native parsing (e.g. scraped datetime strings like
+  // "2026-07-10T06:30:00.000Z"), with a safe default if unparseable.
   const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0, 10);
+  if (Number.isNaN(date.getTime())) return todayIST();
   return date.toISOString().slice(0, 10);
 }
 
@@ -407,7 +441,11 @@ app.post('/ads', async (req, res) => {
       return res.status(400).json({ error: 'category, title, and phone are required' });
     }
     const today  = todayIST();
-    const dayPub = dayName(new Date());
+    // FIX: was `dayName(new Date())`, which computes the weekday from the raw
+    // current UTC instant — inconsistent with `today` (IST-adjusted) near
+    // midnight. Now derives the day name from the same IST-adjusted date so
+    // date_published and day_published always agree.
+    const dayPub = dayName(today);
     const [result] = await db.query(`
       INSERT INTO classified_ads
         (date_published, day_published, category, sub_category, title, description,
@@ -449,6 +487,11 @@ app.post('/ads/bulk', requireAdmin, async (req, res) => {
         continue;
       }
       const source = ['scraper', 'pdf', 'seller'].includes(raw.source) ? raw.source : 'pdf';
+      // FIX: toDateValue() now explicitly parses DD/MM/YYYY (and DD-MM-YYYY)
+      // instead of handing ambiguous strings to the native Date parser, which
+      // was misreading Indian-format dates as US-format (e.g. "10/07/2026"
+      // read as October 7 instead of 10 July) — this was the actual cause of
+      // the wrong weekday showing up after CSV import.
       const datePublished = raw.datePublished ? toDateValue(raw.datePublished) : todayIST();
       const dayPublished   = raw.dayPublished || dayName(datePublished);
 
