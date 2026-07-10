@@ -174,6 +174,15 @@ function normalizeAd(row, sno) {
   const dayPublished  = row.day_published || dayName(datePublished);
   const normalizedCat = normalizeCategory(rawCategory);
 
+  // NEW: category-specific extra fields (matrimonial/jobs/automotive) are
+  // stored as JSON text in the `details` column so we don't need a new DB
+  // column per field. Parse defensively — bad/legacy data should never
+  // break the whole ad listing.
+  let details = null;
+  if (row.details) {
+    try { details = JSON.parse(row.details); } catch (_) { details = null; }
+  }
+
   return {
     id:             row.id,
     sno,
@@ -192,6 +201,7 @@ function normalizeAd(row, sno) {
     source:         row.source   || (row.scraped_at ? 'scraper' : 'seller'),
     status:         row.status   || 'active',
     scraped_at:     row.scraped_at || null,
+    details,
   };
 }
 
@@ -273,7 +283,8 @@ async function _initDBOnce() {
       phone           VARCHAR(60)   DEFAULT NULL,
       whatsapp        VARCHAR(60)   DEFAULT NULL,
       email           VARCHAR(120)  DEFAULT NULL,
-      scraped_at      DATETIME      DEFAULT NULL
+      scraped_at      DATETIME      DEFAULT NULL,
+      details         TEXT          DEFAULT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -294,6 +305,11 @@ async function _initDBOnce() {
     ['whatsapp',       "VARCHAR(60)   DEFAULT NULL"],
     ['email',          "VARCHAR(120)  DEFAULT NULL"],
     ['scraped_at',     "DATETIME      DEFAULT NULL"],
+    // NEW: JSON-as-text store for category-specific extra fields
+    // (matrimonial/jobs/automotive). Using information_schema-based
+    // addColumnIfMissing (not "ADD COLUMN IF NOT EXISTS") since that
+    // syntax isn't supported on MySQL 5.7, which Railway runs here.
+    ['details',        "TEXT          DEFAULT NULL"],
   ];
   for (const [col, def] of cols) await addColumnIfMissing('classified_ads', col, def);
 
@@ -411,7 +427,7 @@ app.get('/ads', async (req, res) => {
         id, category, sub_category, title, description,
         location, price, size_area, phone,
         whatsapp, email, source, status,
-        date_published, day_published, scraped_at
+        date_published, day_published, scraped_at, details
       FROM classified_ads
       ${where}
       ORDER BY ${orderBy}
@@ -435,7 +451,7 @@ app.get('/ads/:id', async (req, res) => {
         id, category, sub_category, title, description,
         location, price, size_area, phone,
         whatsapp, email, source, status,
-        date_published, day_published, scraped_at
+        date_published, day_published, scraped_at, details
       FROM classified_ads
       WHERE id = ? AND newspaper_name = 'Deccan Chronicle'
     `, [id]);
@@ -467,7 +483,7 @@ app.delete('/ads/:id', requireAdmin, async (req, res) => {
 // ── POST /ads (seller submission) ──────────────────────────────────────────
 app.post('/ads', async (req, res) => {
   try {
-    const { category, subCategory, title, description, location, price, sizeArea, phone, whatsapp, email } = req.body;
+    const { category, subCategory, title, description, location, price, sizeArea, phone, whatsapp, email, details } = req.body;
     if (!category || !title || !phone) {
       return res.status(400).json({ error: 'category, title, and phone are required' });
     }
@@ -477,16 +493,21 @@ app.post('/ads', async (req, res) => {
     // midnight. Now derives the day name from the same IST-adjusted date so
     // date_published and day_published always agree.
     const dayPub = dayName(today);
+    // NEW: category-specific extra fields (matrimonial/jobs/automotive),
+    // stored as JSON text. `details` is optional and category-shaped on the
+    // frontend, but the backend just stores whatever object it's given.
+    const detailsJson = JSON.stringify(details && typeof details === 'object' ? details : {});
     const [result] = await db.query(`
       INSERT INTO classified_ads
         (date_published, day_published, category, sub_category, title, description,
          location, price, size_area, phone, whatsapp, email,
-         source, status, newspaper_name, scraped_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'seller', 'active', 'Deccan Chronicle', NULL)
+         source, status, newspaper_name, scraped_at, details)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'seller', 'active', 'Deccan Chronicle', NULL, ?)
     `, [
       today, dayPub, category, subCategory || 'General', title,
       description || '', location || '', price || 'Not mentioned',
       sizeArea || 'Not mentioned', phone, whatsapp || '', email || '',
+      detailsJson,
     ]);
     res.json({ success: true, id: result.insertId });
   } catch (err) {
@@ -525,19 +546,23 @@ app.post('/ads/bulk', requireAdmin, async (req, res) => {
       // the wrong weekday showing up after CSV import.
       const datePublished = raw.datePublished ? toDateValue(raw.datePublished) : todayIST();
       const dayPublished   = raw.dayPublished || dayName(datePublished);
+      // NEW: category-specific extra fields, stored as JSON text. CSV rows
+      // may supply a `details` object directly (e.g. programmatic import),
+      // or nothing at all — either way we store a valid JSON object.
+      const detailsJson = JSON.stringify(raw.details && typeof raw.details === 'object' ? raw.details : {});
 
       try {
         const [result] = await db.query(`
           INSERT INTO classified_ads
             (date_published, day_published, category, sub_category, title, description,
              location, price, size_area, phone, whatsapp, email,
-             source, status, newspaper_name, scraped_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'Deccan Chronicle', NULL)
+             source, status, newspaper_name, scraped_at, details)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'Deccan Chronicle', NULL, ?)
         `, [
           datePublished, dayPublished, category, raw.subCategory || 'General', title,
           raw.description || '', raw.location || '', raw.price || 'Not mentioned',
           raw.sizeArea || 'Not mentioned', raw.phone || '', raw.whatsapp || '', raw.email || '',
-          source,
+          source, detailsJson,
         ]);
         results.push({ ok: true, id: result.insertId });
       } catch (e) {
