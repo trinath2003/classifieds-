@@ -203,6 +203,10 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
 .okbox p{font-size:12px;color:var(--tx2);margin-bottom:16px}
 .viewbtn{background:var(--green);color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:12px;font-weight:700;cursor:pointer}
 
+/* ── category-specific extra fields ── */
+.catfields{margin:16px 0;padding-top:14px;border-top:1px dashed var(--bd)}
+.catfields-h{font-size:11px;color:var(--tx3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
+
 /* ── admin login modal ── */
 .modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:200}
 .modal-ov.show{display:flex}
@@ -328,7 +332,7 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
         <div class="fg2">
           <div class="frow">
             <label class="flab">Category <b>*</b></label>
-            <select class="fin" id="f-cat">
+            <select class="fin" id="f-cat" onchange="onCategoryChange()">
               <option value="">Select…</option>
               <option>Property</option><option>Matrimonial</option>
               <option>Jobs</option><option>Automotive</option>
@@ -365,6 +369,13 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
           <div class="frow"><label class="flab">WhatsApp</label><input class="fin" id="f-wa" placeholder="If different"/></div>
         </div>
         <div class="frow"><label class="flab">Email</label><input class="fin" id="f-email" placeholder="seller@example.com"/></div>
+
+        <!-- NEW: category-specific extra fields, rendered dynamically by
+             renderCategoryFields() based on the selected category. Kept as
+             one container (rather than three static blocks) so adding a
+             fourth category later is a JS-only change. -->
+        <div id="catFields"></div>
+
         <div class="frow"><label class="flab">Description</label><textarea class="fin" id="f-desc" rows="3" placeholder="Full ad text…"></textarea></div>
         <button class="subbtn" onclick="submitAd()">Submit ad</button>
       </div>
@@ -435,6 +446,102 @@ function bdg(s){
   if(s==='pdf')     return '<span class="badge bp">pdf</span>';
   return '<span class="badge bsl">seller</span>';
 }
+
+// ── NEW: category-specific extra fields config ──────────────────────────────
+// Each entry: [inputId, label, placeholder, type]. type omitted = text input.
+// These are rendered into #catFields based on the selected category, and
+// collected into a `details` object (sent as JSON) on submit. Fields that
+// overlap with the generic Location/Price/Phone/Email inputs above
+// (e.g. Jobs' "place"/"salary"/"HR contact"/"mail id") are intentionally
+// NOT duplicated here — they reuse those existing fields.
+const CATEGORY_FIELDS = {
+  Matrimonial: [
+    ['mat-brideOrGroom', 'Bride or Groom', null, 'select', ['Bride','Groom']],
+    ['mat-name',         'Name', 'Full name'],
+    ['mat-caste',        'Caste', 'e.g. Reddy'],
+    ['mat-subCaste',     'Sub-caste', 'If known'],
+    ['mat-gotra',        'Gotra', 'If known'],
+    ['mat-occupation',   'Occupation', 'e.g. Software Engineer'],
+    ['mat-height',       'Height', 'e.g. 5\'6"'],
+    ['mat-salary',       'Salary', 'e.g. ₹12 LPA'],
+    ['mat-totalAssets',  'Total assets', 'e.g. 2 flats, 1 plot'],
+    ['mat-siblings',     'Siblings', 'e.g. 1 brother, 1 sister'],
+    ['mat-fatherName',   "Father's name", ''],
+    ['mat-motherName',   "Mother's name", ''],
+  ],
+  Jobs: [
+    ['job-companyName',  'Company name', 'e.g. Tech Mahindra'],
+    ['job-role',         'Role', 'e.g. Senior Accountant'],
+    ['job-jobType',      'Type', null, 'select', ['IT','Non-IT']],
+    ['job-hoursPerWeek', 'Hours / week', 'e.g. 48'],
+  ],
+  Automotive: [
+    ['auto-vehicleType',    'Vehicle type', null, 'select', ['Car','Bike','Lorry','Tractor','Other']],
+    ['auto-brand',          'Brand', 'e.g. Maruti Suzuki'],
+    ['auto-condition',      'Condition', 'e.g. Excellent / Good / Fair'],
+    ['auto-kmDriven',       'Kilometers driven', 'e.g. 45000'],
+    ['auto-serviceHistory', 'Service history', 'e.g. Full service history available'],
+  ],
+};
+
+function renderCategoryFields(cat){
+  var container = document.getElementById('catFields');
+  var fields = CATEGORY_FIELDS[cat];
+  if(!fields){ container.innerHTML=''; return; }
+
+  var h = '<div class="catfields"><div class="catfields-h">'+esc(cat)+' details</div><div class="fg2">';
+  fields.forEach(function(f, idx){
+    var id=f[0], label=f[1], placeholder=f[2], type=f[3], options=f[4];
+    // full-width for the last field if the group is odd-length, so it
+    // doesn't leave a dangling empty grid cell
+    var wide = (idx===fields.length-1 && fields.length%2===1) ? ' style="grid-column:1/-1"' : '';
+    h += '<div class="frow"'+wide+'><label class="flab">'+esc(label)+'</label>';
+    if(type==='select'){
+      h += '<select class="fin" id="'+id+'"><option value="">Select…</option>';
+      options.forEach(function(o){ h += '<option>'+esc(o)+'</option>'; });
+      h += '</select>';
+    } else {
+      h += '<input class="fin" id="'+id+'" placeholder="'+esc(placeholder||'')+'"/>';
+    }
+    h += '</div>';
+  });
+  h += '</div></div>';
+  container.innerHTML = h;
+}
+
+function onCategoryChange(){
+  renderCategoryFields(document.getElementById('f-cat').value);
+}
+
+function collectCategoryDetails(cat){
+  var fields = CATEGORY_FIELDS[cat];
+  if(!fields) return {};
+  var details = {};
+  fields.forEach(function(f){
+    var id = f[0];
+    var el = document.getElementById(id);
+    if(el) details[id.replace(/^(mat|job|auto)-/,'')] = el.value.trim();
+  });
+  return details;
+}
+
+// Labels for rendering `details` on the detail page — mirrors CATEGORY_FIELDS
+// but keyed by the short field name (post-prefix) since that's how details
+// come back from the API.
+const DETAIL_LABELS = {
+  Matrimonial: {
+    brideOrGroom:'Bride / Groom', name:'Name', caste:'Caste', subCaste:'Sub-caste',
+    gotra:'Gotra', occupation:'Occupation', height:'Height', salary:'Salary',
+    totalAssets:'Total assets', siblings:'Siblings', fatherName:"Father's name", motherName:"Mother's name"
+  },
+  Jobs: {
+    companyName:'Company name', role:'Role', jobType:'Type', hoursPerWeek:'Hours / week'
+  },
+  Automotive: {
+    vehicleType:'Vehicle type', brand:'Brand', condition:'Condition',
+    kmDriven:'Kilometers driven', serviceHistory:'Service history'
+  }
+};
 
 // ── API calls ──────────────────────────────────────────────────────────────
 async function apiFetch(path){
@@ -711,6 +818,18 @@ async function openDet(sno){
     ['Size / area',a.size_area||'—'],
     ['Source',     a.source],
   ];
+
+  // NEW: append category-specific detail rows (matrimonial/jobs/automotive)
+  // if this ad has any. Skips blank values so the table doesn't fill up
+  // with empty "—" rows for fields the poster left out.
+  var labels = DETAIL_LABELS[a.category];
+  if(a.details && labels){
+    Object.keys(labels).forEach(function(key){
+      var val = a.details[key];
+      if(val){ rows.push([labels[key], val]); }
+    });
+  }
+
   document.getElementById('det-table').innerHTML = rows.map(function(r){
     return '<tr><td>'+r[0]+'</td><td class="'+(r[2]?'green':'')+'">'+esc(String(r[1]))+'</td></tr>';
   }).join('');
@@ -773,6 +892,9 @@ function goPage(id){
     document.getElementById('frmContent').style.display='block';
     document.getElementById('okBox').style.display='none';
     document.getElementById('f-date').value=new Date().toISOString().slice(0,10);
+    // Reset category-specific fields to match whatever category is
+    // currently selected (handles returning to the form after a submit).
+    renderCategoryFields(document.getElementById('f-cat').value);
   }
   window.scrollTo(0,0);
 }
@@ -789,6 +911,10 @@ async function submitAd(){
   if(!phone) { document.getElementById('e-phone').style.display='block'; ok=false; }
   if(!ok) return;
 
+  // NEW: gather category-specific extra fields (matrimonial/jobs/automotive)
+  // into a details object, sent alongside the regular fields.
+  var details = collectCategoryDetails(cat);
+
   try{
     var res = await fetch(API+'/ads', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -804,6 +930,7 @@ async function submitAd(){
         whatsapp:    document.getElementById('f-wa').value,
         email:       document.getElementById('f-email').value,
         source:      'seller',
+        details:     details,
       })
     });
     var data = await res.json();
@@ -920,25 +1047,35 @@ function mapRowToAd(row){
     email:        get('email'),
     datePublished:get('datepublished','date_published','date'),
     dayPublished: get('daypublished','day_published','day'),
-    source:       get('source') || 'pdf'
+    source:       get('source') || 'pdf',
+    // NEW: category-specific extra fields, if the CSV includes them as
+    // separate columns named exactly like the field keys used in the post
+    // form (e.g. "caste", "companyName", "vehicleType"). Blank/missing
+    // columns are simply omitted from details.
+    details: {
+      brideOrGroom:   get('brideorgroom','bride_or_groom'),
+      name:           get('name'),
+      caste:          get('caste'),
+      subCaste:       get('subcaste','sub_caste'),
+      gotra:          get('gotra'),
+      occupation:     get('occupation'),
+      height:         get('height'),
+      salary:         get('salary'),
+      totalAssets:    get('totalassets','total_assets'),
+      siblings:       get('siblings'),
+      fatherName:     get('fathername','father_name'),
+      motherName:     get('mothername','mother_name'),
+      companyName:    get('companyname','company_name'),
+      role:           get('role'),
+      jobType:        get('jobtype','job_type'),
+      hoursPerWeek:   get('hoursperweek','hours_per_week'),
+      vehicleType:    get('vehicletype','vehicle_type'),
+      brand:          get('brand'),
+      condition:      get('condition'),
+      kmDriven:       get('kmdriven','km_driven'),
+      serviceHistory: get('servicehistory','service_history'),
+    }
   };
-}
-
-function handleCsvUpload(file){
-  if(!file) return;
-  if(!isAdmin){ alert('Admin sign-in required to import a CSV.'); return; }
-  var reader = new FileReader();
-  reader.onload = function(e){
-    var rows;
-    try{ rows = parseCSV(e.target.result); }
-    catch(err){ alert('Could not parse CSV: '+err.message); return; }
-    if(!rows.length){ alert('No rows found in that CSV.'); return; }
-    bulkUploadAds(rows.map(mapRowToAd));
-  };
-  reader.onerror = function(){ alert('Could not read the file.'); };
-  reader.readAsText(file);
-  // reset the input so selecting the same file again re-triggers onchange
-  document.getElementById('csvFile').value='';
 }
 
 var CSV_BATCH_SIZE = 25; // rows per /ads/bulk request
@@ -994,6 +1131,23 @@ function updateCsvProgress(done,total,okCount,failCount,fill,status){
   var pct = Math.round(done/total*100);
   fill.style.width=pct+'%';
   status.textContent = 'Processed '+done+' / '+total+' · '+okCount+' ok · '+failCount+' failed';
+}
+
+function handleCsvUpload(file){
+  if(!file) return;
+  if(!isAdmin){ alert('Admin sign-in required to import a CSV.'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e){
+    var rows;
+    try{ rows = parseCSV(e.target.result); }
+    catch(err){ alert('Could not parse CSV: '+err.message); return; }
+    if(!rows.length){ alert('No rows found in that CSV.'); return; }
+    bulkUploadAds(rows.map(mapRowToAd));
+  };
+  reader.onerror = function(){ alert('Could not read the file.'); };
+  reader.readAsText(file);
+  // reset the input so selecting the same file again re-triggers onchange
+  document.getElementById('csvFile').value='';
 }
 
 function closeCsvToast(){
