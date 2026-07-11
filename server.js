@@ -288,6 +288,22 @@ async function _initDBOnce() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // NEW: anonymous per-ad chat. No accounts — each browser generates a
+  // random `sender_token` client-side (stored in localStorage) purely to
+  // tell "you" apart from "the other person" in a thread. It carries no
+  // real identity, phone, or email, and is never cross-referenced with the
+  // seller's contact info stored on the ad itself.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS ad_messages (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      ad_id         INT NOT NULL,
+      sender_token  VARCHAR(64) NOT NULL,
+      message       TEXT NOT NULL,
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_ad_id (ad_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   const cols = [
     ['newspaper_name', "VARCHAR(100)  DEFAULT NULL"],
     ['source',         "ENUM('scraper','pdf','seller') NOT NULL DEFAULT 'scraper'"],
@@ -381,7 +397,7 @@ app.get('/ads', async (req, res) => {
   try {
     const {
       category, subCategory, source, day, date,
-      dateFrom, dateTo, search, sort = 'newest',
+      dateFrom, dateTo, search, state, sort = 'newest',
       page = 1, limit: rawLimit = 24,
     } = req.query;
 
@@ -398,6 +414,11 @@ app.get('/ads', async (req, res) => {
     if (date)        { cond.push('date_published = ?');              params.push(date); }
     if (dateFrom)    { cond.push('date_published >= ?');             params.push(dateFrom); }
     if (dateTo)      { cond.push('date_published <= ?');             params.push(dateTo); }
+    // NEW: filter by Indian state/UT — matches the state name against the
+    // free-text `location` field (ads don't have a dedicated state column,
+    // so this is a best-effort text match, e.g. location="Jubilee Hills,
+    // Hyderabad, Telangana" matches state=Telangana).
+    if (state)        { cond.push('LOWER(location) LIKE LOWER(?)');    params.push(`%${state}%`); }
 
     if (search) {
       const t = `%${search}%`;
@@ -480,7 +501,65 @@ app.delete('/ads/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ── POST /ads (seller submission) ──────────────────────────────────────────
+// ── Anonymous per-ad chat ────────────────────────────────────────────────
+// No accounts, no login. `sender_token` is a random ID the browser makes up
+// for itself (see index.html) — it only distinguishes the two sides of a
+// conversation, never reveals a name/phone/email. Every message is scoped
+// to a single ad_id, so a buyer's messages on ad A don't leak into ad B.
+
+function sanitizeToken(t) {
+  const s = String(t || '').trim();
+  return /^[A-Za-z0-9_-]{6,64}$/.test(s) ? s : null;
+}
+
+// GET /ads/:id/messages — full thread for one ad, oldest first
+app.get('/ads/:id/messages', async (req, res) => {
+  try {
+    const adId = Number(req.params.id);
+    if (!Number.isFinite(adId) || adId < 1) return res.status(400).json({ error: 'Invalid ad id' });
+    const [rows] = await db.query(
+      `SELECT id, ad_id, sender_token, message, created_at
+       FROM ad_messages WHERE ad_id = ? ORDER BY created_at ASC, id ASC LIMIT 500`,
+      [adId]
+    );
+    res.json({ data: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /ads/:id/messages — body: { senderToken, message }
+app.post('/ads/:id/messages', async (req, res) => {
+  try {
+    const adId = Number(req.params.id);
+    if (!Number.isFinite(adId) || adId < 1) return res.status(400).json({ error: 'Invalid ad id' });
+
+    const senderToken = sanitizeToken(req.body.senderToken);
+    if (!senderToken) return res.status(400).json({ error: 'Invalid sender token' });
+
+    const message = String(req.body.message || '').trim();
+    if (!message) return res.status(400).json({ error: 'Message cannot be empty' });
+    if (message.length > 2000) return res.status(400).json({ error: 'Message too long (max 2000 chars)' });
+
+    // Confirm the ad actually exists so chat threads can't pile up on
+    // deleted/nonexistent ads.
+    const [adRows] = await db.query(
+      `SELECT id FROM classified_ads WHERE id = ? AND newspaper_name = 'Deccan Chronicle'`,
+      [adId]
+    );
+    if (!adRows.length) return res.status(404).json({ error: 'Ad not found' });
+
+    const [result] = await db.query(
+      `INSERT INTO ad_messages (ad_id, sender_token, message) VALUES (?, ?, ?)`,
+      [adId, senderToken, message]
+    );
+    res.json({ success: true, id: result.insertId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.post('/ads', async (req, res) => {
   try {
     const { category, subCategory, title, description, location, price, sizeArea, phone, whatsapp, email, details } = req.body;
