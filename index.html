@@ -828,7 +828,7 @@ function renderGrid(res){
     h+='<div class="cloc">📍 '+esc(a.location||'—')+'</div>';
     h+='<div class="cprice">'+esc(a.price||'—')+'</div></div></div>';
     h+='<div class="cmeta"><span class="mpill">'+esc(a.sub_category||a.category)+'</span></div>';
-    h+='<div class="cfoot">'+bdg(a.source)+'<span class="cdate">'+esc(a.day_published)+'</span></div></div>';
+    h+='<div class="cfoot">'+(isAdmin?bdg(a.source):'<span></span>')+'<span class="cdate">'+esc(a.day_published)+'</span></div></div>';
   });
   document.getElementById('grid').innerHTML=h;
   // store for detail lookup
