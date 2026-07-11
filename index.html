@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -269,11 +268,13 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
       <div class="ci" id="ci-Jobs"        onclick="setCat('Jobs',this)">       <div class="ci-l">💼 Jobs</div>       <span class="cc" id="cnt-Jobs">–</span></div>
       <div class="ci" id="ci-Automotive"  onclick="setCat('Automotive',this)"> <div class="ci-l">🚗 Automotive</div><span class="cc" id="cnt-Automotive">–</span></div>
 
-      <div class="sep"></div>
-      <div class="sh">Source</div>
-      <div class="ci" id="ci-src-scraper" onclick="setSrc('scraper',this)"><div class="ci-l">🖥 Scraper</div><span class="cc" id="cnt-scraper">–</span></div>
-      <div class="ci" id="ci-src-pdf"     onclick="setSrc('pdf',this)">    <div class="ci-l">📄 PDF import</div><span class="cc" id="cnt-pdf">–</span></div>
-      <div class="ci" id="ci-src-seller"  onclick="setSrc('seller',this)"> <div class="ci-l">👤 Seller</div><span class="cc" id="cnt-seller">–</span></div>
+      <div id="src-sidebar" style="display:none">
+        <div class="sep"></div>
+        <div class="sh">Source</div>
+        <div class="ci" id="ci-src-scraper" onclick="setSrc('scraper',this)"><div class="ci-l">🖥 Scraper</div><span class="cc" id="cnt-scraper">–</span></div>
+        <div class="ci" id="ci-src-pdf"     onclick="setSrc('pdf',this)">    <div class="ci-l">📄 PDF import</div><span class="cc" id="cnt-pdf">–</span></div>
+        <div class="ci" id="ci-src-seller"  onclick="setSrc('seller',this)"> <div class="ci-l">👤 Seller</div><span class="cc" id="cnt-seller">–</span></div>
+      </div>
 
       <div class="sep"></div>
       <div class="sh">This week's papers</div>
@@ -1028,14 +1029,21 @@ function confirmAdminLogin(){
 function updateAdminUI(){
   var adminBtn=document.getElementById('adminBtn');
   var csvBtn=document.getElementById('csvBtn');
+  var srcSidebar=document.getElementById('src-sidebar');
   if(isAdmin){
     adminBtn.textContent='🔓 Admin (on)';
     adminBtn.classList.add('active');
     csvBtn.classList.add('show');
+    srcSidebar.style.display='block';
   } else {
     adminBtn.textContent='🔒 Admin';
     adminBtn.classList.remove('active');
     csvBtn.classList.remove('show');
+    srcSidebar.style.display='none';
+    // If a non-admin somehow had a source filter active (e.g. leftover
+    // state from switching out of admin mode), clear it so the ad list
+    // doesn't silently stay filtered by a control they can no longer see.
+    if(state.src){ state.src=''; state.page=1; reload(); }
   }
 }
 
