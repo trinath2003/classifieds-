@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -82,6 +81,26 @@ body{background:var(--bg);color:var(--tx);font-size:14px;transition:background .
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .postbtn{background:var(--tx);color:#111;border:none;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
 .postbtn:hover{background:#ccc}
+html[data-theme="light"] .postbtn{background:#5c6066;color:#fff}
+html[data-theme="light"] .postbtn:hover{background:#4a4e54}
+.wishbtn{
+  background:var(--bg3);border:1px solid var(--bd);border-radius:9px;color:var(--tx2);
+  padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;
+  display:flex;align-items:center;gap:5px
+}
+.wishbtn:hover{border-color:var(--red);color:var(--red)}
+.wishbtn #wishCount{background:var(--bg4);color:var(--tx2);font-size:10px;padding:1px 6px;border-radius:99px}
+
+/* ── wishlist heart on ad cards ── */
+.card-heart{
+  position:absolute;top:10px;right:10px;width:26px;height:26px;border-radius:8px;
+  background:rgba(0,0,0,.25);border:1px solid var(--bd);color:var(--tx2);
+  font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2
+}
+.card-heart:hover{border-color:var(--red);color:var(--red)}
+.card-heart.on{background:rgba(226,75,74,.15);border-color:var(--red);color:var(--red)}
+/* when both delete (admin) and heart icons are shown on a card, stack them */
+.card-del ~ .card-heart{ right:44px; }
 
 /* ── admin controls ── */
 .adminbtn{background:var(--bg3);color:var(--tx2);border:1px solid var(--bd);border-radius:9px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px}
@@ -362,6 +381,11 @@ body{background:var(--bg);color:var(--tx);font-size:14px;transition:background .
 
     <!-- Public post-ad button, always visible -->
     <button class="postbtn" onclick="goPage('pg-form')">+ Post ad</button>
+
+    <!-- Wishlist -->
+    <button class="wishbtn" id="wishBtn" onclick="goPage('pg-wishlist')" title="My wishlist">
+      ❤️ <span id="wishCount">0</span>
+    </button>
   </div>
 
   <div class="layout">
@@ -519,6 +543,17 @@ body{background:var(--bg);color:var(--tx);font-size:14px;transition:background .
         <button class="viewbtn" onclick="goPage('pg-list')">View all ads</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ── WISHLIST PAGE ─────────────────────────────────────────────────── -->
+<div class="page" id="pg-wishlist">
+  <div class="detbar">
+    <button class="backbtn" onclick="goPage('pg-list')">← Back</button>
+    <span style="font-size:12px;color:var(--tx3)">❤️ My wishlist</span>
+  </div>
+  <div class="main" style="max-width:900px;margin:0 auto">
+    <div class="grid" id="wishGrid"></div>
   </div>
 </div>
 
@@ -786,6 +821,7 @@ function renderGrid(res){
     if(isAdmin){
       h+='<button class="card-del" title="Delete ad" onclick="event.stopPropagation();deleteAd('+a.id+')">🗑</button>';
     }
+    h+='<button class="card-heart'+(isWished(a.id)?' on':'')+'" title="Add to wishlist" onclick="event.stopPropagation();toggleWish('+a.id+', this)">'+(isWished(a.id)?'❤️':'🤍')+'</button>';
     h+='<div class="card-top"><div class="cico '+ic.cl+'">'+ic.e+'</div>';
     h+='<div class="cinfo"><div class="csno">#'+a.sno+' · '+esc(a.day_published)+', '+fmt(a.date_published)+'</div>';
     h+='<div class="ctit">'+esc(a.title||'Untitled')+'</div>';
@@ -1137,6 +1173,80 @@ async function sendChatMessage(){
 }
 
 
+// ── Wishlist (saved ads) ────────────────────────────────────────────────
+// Stored per-browser in localStorage as an array of ad ids — no account
+// needed. Persists across visits on the same device/browser.
+function getWishlist(){
+  try{ return JSON.parse(localStorage.getItem('cd_wishlist') || '[]'); }
+  catch(_){ return []; }
+}
+function saveWishlist(list){
+  localStorage.setItem('cd_wishlist', JSON.stringify(list));
+  updateWishCount();
+}
+function isWished(id){ return getWishlist().indexOf(id) !== -1; }
+
+function toggleWish(id, btnEl){
+  var list = getWishlist();
+  var idx = list.indexOf(id);
+  if(idx === -1){
+    list.push(id);
+    if(btnEl){ btnEl.classList.add('on'); btnEl.textContent='❤️'; }
+  } else {
+    list.splice(idx, 1);
+    if(btnEl){ btnEl.classList.remove('on'); btnEl.textContent='🤍'; }
+  }
+  saveWishlist(list);
+}
+
+function updateWishCount(){
+  var el = document.getElementById('wishCount');
+  if(el) el.textContent = getWishlist().length;
+}
+
+async function renderWishlistPage(){
+  var grid = document.getElementById('wishGrid');
+  var ids = getWishlist();
+  if(!ids.length){
+    grid.innerHTML = '<div class="empty"><h3>Your wishlist is empty</h3><p>Tap the 🤍 heart on any ad to save it here.</p></div>';
+    return;
+  }
+  grid.innerHTML = '<div class="empty"><p>Loading saved ads…</p></div>';
+  var ads = [];
+  for(var i=0;i<ids.length;i++){
+    try{ ads.push(await apiFetch('/ads/'+ids[i])); }
+    catch(_){ /* ad may have been deleted since being wishlisted — skip it */ }
+  }
+  if(!ads.length){
+    grid.innerHTML = '<div class="empty"><h3>No saved ads found</h3><p>The ads you saved may have been removed.</p></div>';
+    return;
+  }
+  var h='';
+  ads.forEach(function(a){
+    var ic=icoFor(a.category,a.sub_category);
+    h+='<div class="card" onclick="openDetById('+a.id+')">';
+    h+='<button class="card-heart on" title="Remove from wishlist" onclick="event.stopPropagation();toggleWish('+a.id+', this);renderWishlistPage()">❤️</button>';
+    h+='<div class="card-top"><div class="cico '+ic.cl+'">'+ic.e+'</div>';
+    h+='<div class="cinfo"><div class="csno">'+esc(a.day_published)+', '+fmt(a.date_published)+'</div>';
+    h+='<div class="ctit">'+esc(a.title||'Untitled')+'</div>';
+    h+='<div class="cloc">📍 '+esc(a.location||'—')+'</div>';
+    h+='<div class="cprice">'+esc(a.price||'—')+'</div></div></div>';
+    h+='<div class="cmeta"><span class="mpill">'+esc(a.sub_category||a.category)+'</span></div>';
+    h+='</div>';
+  });
+  grid.innerHTML = h;
+}
+
+// Opens the detail page directly by real ad id (used from the wishlist page,
+// which fetches individual ads by id rather than by list-relative #sno).
+async function openDetById(id){
+  try{
+    var a = await apiFetch('/ads/'+id);
+    window._ads = (window._ads||[]).concat([a]);
+    openDet(a.sno);
+  } catch(e){ alert('Could not load ad details'); }
+}
+
 // Calls DELETE /ads/:id using the ad's real database id (not the on-screen
 // #sno label, which is just a page-relative display number).
 async function deleteAd(id){
@@ -1179,6 +1289,7 @@ function goPage(id){
     // currently selected (handles returning to the form after a submit).
     renderCategoryFields(document.getElementById('f-cat').value);
   }
+  if(id==='pg-wishlist'){ renderWishlistPage(); }
   window.scrollTo(0,0);
 }
 
@@ -1446,6 +1557,7 @@ function closeCsvToast(){
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 loadTheme();
+updateWishCount();
 populateStateSelector();
 updateAdminUI();
 loadStats();
