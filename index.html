@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -819,37 +820,68 @@ async function openDet(sno){
   document.getElementById('det-tit').textContent   = a.title || 'Untitled';
   var dico = document.getElementById('det-ico');
   dico.textContent = ic.e; dico.className = 'dico '+ic.cl;
+  // NOTE: source is intentionally not shown anywhere on the detail page
+  // (no "Source" table row, no source badge) — it's internal bookkeeping,
+  // not something a reader of the ad needs to see.
   document.getElementById('det-badges').innerHTML =
-    bdg(a.source)+
     '<span class="badge" style="background:var(--bg3);color:var(--tx2);border:1px solid var(--bd)">'+esc(a.day_published)+'</span>'+
     '<span class="badge" style="background:var(--bg3);color:var(--tx2);border:1px solid var(--bd)">#'+a.sno+'</span>';
 
+  // Per-category relabeling of the generic Price / Size-area rows, so a
+  // Matrimonial ad shows "Salary" instead of "Price" and "Height" instead
+  // of "Size / area", pulling the value from `details` when present (and
+  // falling back to the generic field only if details didn't have it).
+  var d = a.details || {};
+  var CATEGORY_ROW_OVERRIDES = {
+    Matrimonial: {
+      price:     { label: 'Salary', value: d.salary || a.price, green: true },
+      size_area: { label: 'Height', value: d.height || a.size_area },
+    },
+    Jobs: {
+      price:     { label: 'Salary', value: a.price, green: true },
+    },
+    Automotive: {
+      size_area: { label: 'Kilometers driven', value: d.kmDriven || a.size_area },
+    },
+  };
+  var overrides = CATEGORY_ROW_OVERRIDES[a.category] || {};
+  var priceRow = overrides.price     || { label: 'Price',       value: a.price,     green: true };
+  var sizeRow  = overrides.size_area || { label: 'Size / area', value: a.size_area };
+
   var rows = [
-    ['S.No',       '#'+a.sno],
-    ['Date',       fmt(a.date_published)],
-    ['Day',        a.day_published],
-    ['Category',   a.category],
+    ['S.No',        '#'+a.sno],
+    ['Date',        fmt(a.date_published)],
+    ['Day',         a.day_published],
+    ['Category',    a.category],
     ['Sub-category',a.sub_category],
-    ['Location',   a.location||'—'],
-    ['Price',      a.price||'—', true],
-    ['Size / area',a.size_area||'—'],
-    ['Source',     a.source],
+    ['Location',    a.location],
+    [priceRow.label, priceRow.value, priceRow.green],
+    [sizeRow.label,  sizeRow.value],
   ];
 
-  // NEW: append category-specific detail rows (matrimonial/jobs/automotive)
-  // if this ad has any. Skips blank values so the table doesn't fill up
-  // with empty "—" rows for fields the poster left out.
+  // Category-specific detail rows (matrimonial/jobs/automotive), skipping
+  // any field already surfaced above via an override (e.g. Matrimonial's
+  // salary/height) so it isn't shown twice.
   var labels = DETAIL_LABELS[a.category];
-  if(a.details && labels){
+  var shownKeys = {};
+  if(a.category==='Matrimonial'){ shownKeys.salary=true; shownKeys.height=true; }
+  if(a.category==='Automotive'){ shownKeys.kmDriven=true; }
+  if(labels){
     Object.keys(labels).forEach(function(key){
-      var val = a.details[key];
+      if(shownKeys[key]) return;
+      var val = d[key];
       if(val){ rows.push([labels[key], val]); }
     });
   }
 
-  document.getElementById('det-table').innerHTML = rows.map(function(r){
-    return '<tr><td>'+r[0]+'</td><td class="'+(r[2]?'green':'')+'">'+esc(String(r[1]))+'</td></tr>';
-  }).join('');
+  // Hide any row whose value is blank/undefined instead of showing
+  // "Not mentioned" — keeps the detail page focused on what the poster
+  // actually filled in.
+  document.getElementById('det-table').innerHTML = rows
+    .filter(function(r){ return r[1]!==undefined && r[1]!==null && String(r[1]).trim()!==''; })
+    .map(function(r){
+      return '<tr><td>'+r[0]+'</td><td class="'+(r[2]?'green':'')+'">'+esc(String(r[1]))+'</td></tr>';
+    }).join('');
   document.getElementById('det-desc').textContent = a.description || 'No description provided.';
 
   // Contact panel
