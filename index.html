@@ -37,6 +37,12 @@ body{background:var(--bg);color:var(--tx);font-size:14px;transition:background .
   font-size:11px;padding:5px 8px;outline:none;cursor:pointer;max-width:120px
 }
 .themesel:focus{border-color:var(--green)}
+.nearbtn{
+  background:var(--bg3);border:1px solid var(--bd);border-radius:9px;color:var(--tx2);
+  padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap
+}
+.nearbtn:hover{border-color:var(--green);color:var(--green)}
+.nearbtn.loading{opacity:.7;cursor:wait;border-color:var(--amber);color:var(--amber)}
 
 /* ── pages ── */
 .page{display:none}.page.on{display:block}
@@ -370,7 +376,8 @@ html[data-theme="light"] .postbtn:hover{background:#4a4e54}
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx3)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <input type="text" id="srch" placeholder="Search ads…" oninput="onSearch(this.value)"/>
     </div>
-    <div class="live"><div class="ldot" id="ldot"></div><span id="live-label">Loading…</span></div>
+    <button class="nearbtn" id="nearBtn" onclick="findNearMe()" title="Find ads near my current location">📍 Near me</button>
+    <div class="live" id="liveIndicator" style="display:none"><div class="ldot" id="ldot"></div><span id="live-label">Loading…</span></div>
 
     <!-- Admin-only CSV import (hidden unless admin mode is on) -->
     <button class="csvbtn" id="csvBtn" onclick="document.getElementById('csvFile').click()">📁 Upload CSV</button>
@@ -600,6 +607,53 @@ function loadTheme(){
   setTheme(saved);
 }
 
+// ── "Near me" location detection ────────────────────────────────────────
+// Uses the browser's Geolocation API to get lat/lon, then reverse-geocodes
+// via OpenStreetMap's free Nominatim API to a city/town name — no API key
+// needed. The detected place name is then run through the normal search
+// filter (it matches against title/description/location/category), so
+// results aren't guaranteed to be hyper-local, but line up well for a
+// single-edition (Hyderabad) classifieds set.
+async function findNearMe(){
+  var btn = document.getElementById('nearBtn');
+  if(!navigator.geolocation){
+    alert('Your browser does not support location services.');
+    return;
+  }
+  btn.classList.add('loading');
+  btn.textContent = '📍 Locating…';
+
+  navigator.geolocation.getCurrentPosition(async function(pos){
+    try{
+      var lat = pos.coords.latitude, lon = pos.coords.longitude;
+      var res = await fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat='+lat+'&lon='+lon+'&zoom=12&addressdetails=1');
+      if(!res.ok) throw new Error('Reverse geocoding failed');
+      var data = await res.json();
+      var addr = data.address || {};
+      var place = addr.suburb || addr.neighbourhood || addr.town || addr.city_district || addr.city || addr.county || '';
+      if(!place){
+        alert('Could not determine your city/town from your location.');
+        return;
+      }
+      document.getElementById('srch').value = place;
+      state.q = place; state.page = 1;
+      reload();
+    } catch(e){
+      alert('Could not detect your location: '+e.message);
+    } finally {
+      btn.classList.remove('loading');
+      btn.textContent = '📍 Near me';
+    }
+  }, function(err){
+    btn.classList.remove('loading');
+    btn.textContent = '📍 Near me';
+    if(err.code === err.PERMISSION_DENIED){
+      alert('Location permission denied. Enable location access for this site to use "Near me".');
+    } else {
+      alert('Could not get your location: '+err.message);
+    }
+  }, { enableHighAccuracy:true, timeout:10000 });
+}
 
 const INDIA_STATES = [
   'Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
@@ -1374,16 +1428,19 @@ function updateAdminUI(){
   var adminBtn=document.getElementById('adminBtn');
   var csvBtn=document.getElementById('csvBtn');
   var srcSidebar=document.getElementById('src-sidebar');
+  var liveIndicator=document.getElementById('liveIndicator');
   if(isAdmin){
     adminBtn.textContent='🔓 Admin (on)';
     adminBtn.classList.add('active');
     csvBtn.classList.add('show');
     srcSidebar.style.display='block';
+    liveIndicator.style.display='flex';
   } else {
     adminBtn.textContent='🔒 Admin';
     adminBtn.classList.remove('active');
     csvBtn.classList.remove('show');
     srcSidebar.style.display='none';
+    liveIndicator.style.display='none';
     // If a non-admin somehow had a source filter active (e.g. leftover
     // state from switching out of admin mode), clear it so the ad list
     // doesn't silently stay filtered by a control they can no longer see.
