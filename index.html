@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -24,6 +25,29 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
 }
 .logo{font-size:15px;font-weight:700;white-space:nowrap}.logo b{color:var(--green)}
 .logo small{font-size:10px;color:var(--tx3);font-weight:400;margin-left:4px}
+.statesel{
+  background:var(--bg3);border:1px solid var(--bd);border-radius:8px;color:var(--tx2);
+  font-size:11px;padding:5px 8px;outline:none;cursor:pointer;max-width:150px
+}
+.statesel:focus{border-color:var(--green)}
+
+/* ── anonymous chat widget (ad detail page) ── */
+.chatcard{background:var(--bg2);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:12px}
+.chathead{background:var(--bg3);padding:12px 16px;display:flex;align-items:center;justify-content:space-between}
+.chathead span{font-size:13px;font-weight:700;color:var(--tx)}
+.chathead small{font-size:10px;color:var(--tx3);font-weight:400}
+.chatbody{max-height:300px;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.chatempty{font-size:11px;color:var(--tx3);text-align:center;padding:14px 0}
+.cmsg{max-width:78%;padding:8px 11px;border-radius:12px;font-size:12px;line-height:1.5;word-wrap:break-word}
+.cmsg.me{align-self:flex-end;background:var(--greenl);color:#d8f5e8;border-bottom-right-radius:3px}
+.cmsg.them{align-self:flex-start;background:var(--bg3);color:var(--tx);border-bottom-left-radius:3px}
+.cmsg-t{font-size:9px;opacity:.55;margin-top:3px}
+.chatinput{display:flex;gap:8px;padding:10px 16px;border-top:1px solid var(--bd)}
+.chatinput input{flex:1;border:1px solid var(--bd);border-radius:20px;padding:8px 14px;font-size:12px;outline:none;color:var(--tx);background:var(--bg3)}
+.chatinput input:focus{border-color:var(--green)}
+.chatsend{background:var(--green);color:#fff;border:none;border-radius:20px;padding:8px 16px;font-size:12px;font-weight:700;cursor:pointer}
+.chatsend:hover{background:#17886a}
+.chatsend:disabled{opacity:.5;cursor:default}
 .sw{flex:1;display:flex;align-items:center;background:var(--bg3);border:1px solid var(--bd);border-radius:10px;padding:0 10px;gap:8px}
 .sw input{flex:1;background:none;border:none;outline:none;font-size:13px;color:var(--tx);padding:8px 0}
 .sw input::placeholder{color:var(--tx3)}
@@ -237,7 +261,10 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
 <!-- ── LIST PAGE ─────────────────────────────────────────────────────── -->
 <div class="page on" id="pg-list">
   <div class="bar">
-    <div class="logo">Classifieds<b>Desk</b> <small>Deccan Chronicle</small></div>
+    <div class="logo">Classifieds<b>Desk</b></div>
+    <select class="statesel" id="stateSel" onchange="setState(this.value)">
+      <option value="">🇮🇳 All India</option>
+    </select>
     <div class="sw">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx3)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <input type="text" id="srch" placeholder="Search ads…" oninput="onSearch(this.value)"/>
@@ -325,6 +352,17 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
       <div class="cchead"><span>📞 Contact details</span></div>
       <div class="ccbody" id="cc-body"></div>
       <div class="cbtns" id="cc-btns"></div>
+    </div>
+
+    <!-- NEW: anonymous chat — no accounts, just a random per-browser token
+         so the two sides of a thread can tell each other apart. -->
+    <div class="chatcard">
+      <div class="chathead"><span>💬 Chat about this ad</span><small>Anonymous</small></div>
+      <div class="chatbody" id="chatBody"><div class="chatempty">Loading…</div></div>
+      <div class="chatinput">
+        <input type="text" id="chatInput" placeholder="Type a message…" onkeydown="if(event.key==='Enter')sendChatMessage()"/>
+        <button class="chatsend" id="chatSendBtn" onclick="sendChatMessage()">Send</button>
+      </div>
     </div>
     <div style="text-align:center;padding-bottom:20px">
       <button class="backbtn" onclick="goPage('pg-list')" style="display:inline-flex">← Back to all ads</button>
@@ -433,9 +471,34 @@ const PER = 24;
 // an auth check on the /ads/bulk (or /ads) endpoint as well.
 const ADMIN_PASSCODE = 'dc-admin-2026';
 
+// ── Indian states & union territories, for the location filter ─────────────
+const INDIA_STATES = [
+  'Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
+  'Haryana','Himachal Pradesh','Jharkhand','Karnataka','Kerala','Madhya Pradesh',
+  'Maharashtra','Manipur','Meghalaya','Mizoram','Nagaland','Odisha','Punjab',
+  'Rajasthan','Sikkim','Tamil Nadu','Telangana','Tripura','Uttar Pradesh',
+  'Uttarakhand','West Bengal',
+  'Andaman and Nicobar Islands','Chandigarh','Dadra and Nagar Haveli and Daman and Diu',
+  'Delhi','Jammu and Kashmir','Ladakh','Lakshadweep','Puducherry',
+];
+
+function populateStateSelector(){
+  var sel = document.getElementById('stateSel');
+  INDIA_STATES.forEach(function(s){
+    var opt = document.createElement('option');
+    opt.value = s; opt.textContent = '📍 ' + s;
+    sel.appendChild(opt);
+  });
+}
+
+function setState(s){
+  state.state = s; state.page = 1;
+  reload();
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 let state = {
-  cat: '', sub: '', src: '', day: '', date: '', q: '',
+  cat: '', sub: '', src: '', day: '', date: '', q: '', state: '',
   sort: 'newest', page: 1
 };
 let scraping = false;
@@ -576,6 +639,7 @@ function buildQuery(){
   if(state.src)  p.set('source',      state.src);
   if(state.day)  p.set('day',         state.day);
   if(state.date) p.set('date',        state.date);
+  if(state.state) p.set('state',      state.state);
   if(state.q)    p.set('search',      state.q);
   p.set('sort',  state.sort);
   p.set('page',  state.page);
@@ -660,6 +724,7 @@ function renderChips(){
   if(state.src)  h+='<div class="chip" onclick="setSrc(\'\',null)">'+esc(state.src)+' ×</div>';
   if(state.day)  h+='<div class="chip" onclick="setDay(\'\',null)">📅 '+esc(state.day)+' ×</div>';
   if(state.date) h+='<div class="chip" onclick="setDate(\'\',null)">📅 '+fmt(state.date)+' ×</div>';
+  if(state.state) h+='<div class="chip" onclick="setState(\'\');document.getElementById(\'stateSel\').value=\'\'">📍 '+esc(state.state)+' ×</div>';
   if(state.q)    h+='<div class="chip" onclick="clearSearch()">🔍 '+esc(state.q)+' ×</div>';
   document.getElementById('chips').innerHTML=h;
 }
@@ -814,6 +879,8 @@ async function openDet(sno){
 
   window._currentSno = sno;
   window._currentId  = a.id;
+  loadChat(a.id);
+  startChatPolling(a.id);
   goPage('pg-detail');
   document.getElementById('det-delete-btn').style.display = isAdmin ? 'flex' : 'none';
   var ic = icoFor(a.category, a.sub_category);
@@ -904,7 +971,78 @@ async function openDet(sno){
   document.getElementById('cc-btns').innerHTML=cb;
 }
 
-// ── Delete ad (admin only) ─────────────────────────────────────────────────
+// ── Anonymous chat (per-ad) ──────────────────────────────────────────────
+// Each browser gets a random ID the first time it's needed, stored in
+// localStorage. It's just a way to tell "me" from "the other person" in a
+// thread — not a name, not linked to phone/email, nothing else.
+function getAnonToken(){
+  var t = localStorage.getItem('cd_anon_token');
+  if(!t){
+    t = 'anon-' + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+    localStorage.setItem('cd_anon_token', t);
+  }
+  return t;
+}
+
+var chatPollTimer = null;
+
+function chatTimeLabel(ts){
+  var d = new Date(ts);
+  return d.toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'});
+}
+
+async function loadChat(adId){
+  var body = document.getElementById('chatBody');
+  try{
+    var res = await apiFetch('/ads/'+adId+'/messages');
+    var msgs = res.data || [];
+    var myToken = getAnonToken();
+    if(!msgs.length){
+      body.innerHTML = '<div class="chatempty">No messages yet. Say hello 👋</div>';
+    } else {
+      body.innerHTML = msgs.map(function(m){
+        var mine = m.sender_token === myToken;
+        return '<div class="cmsg '+(mine?'me':'them')+'">'+esc(m.message)+
+          '<div class="cmsg-t">'+chatTimeLabel(m.created_at)+'</div></div>';
+      }).join('');
+      body.scrollTop = body.scrollHeight;
+    }
+  } catch(e){
+    body.innerHTML = '<div class="chatempty">Could not load chat.</div>';
+  }
+}
+
+function startChatPolling(adId){
+  stopChatPolling();
+  chatPollTimer = setInterval(function(){ loadChat(adId); }, 5000);
+}
+function stopChatPolling(){
+  if(chatPollTimer){ clearInterval(chatPollTimer); chatPollTimer=null; }
+}
+
+async function sendChatMessage(){
+  var input = document.getElementById('chatInput');
+  var btn   = document.getElementById('chatSendBtn');
+  var msg   = input.value.trim();
+  if(!msg || !window._currentId) return;
+  btn.disabled = true;
+  try{
+    var res = await fetch(API+'/ads/'+window._currentId+'/messages', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ senderToken: getAnonToken(), message: msg })
+    });
+    var data = await res.json();
+    if(!res.ok) throw new Error(data.error||'Failed to send');
+    input.value = '';
+    await loadChat(window._currentId);
+  } catch(e){
+    alert('Could not send message: '+e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+
 // Calls DELETE /ads/:id using the ad's real database id (not the on-screen
 // #sno label, which is just a page-relative display number).
 async function deleteAd(id){
@@ -938,6 +1076,7 @@ async function deleteAd(id){
 function goPage(id){
   document.querySelectorAll('.page').forEach(function(p){p.classList.remove('on');});
   document.getElementById(id).classList.add('on');
+  if(id!=='pg-detail'){ stopChatPolling(); }
   if(id==='pg-form'){
     document.getElementById('frmContent').style.display='block';
     document.getElementById('okBox').style.display='none';
@@ -1212,6 +1351,7 @@ function closeCsvToast(){
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────
+populateStateSelector();
 updateAdminUI();
 loadStats();
 loadDays();
