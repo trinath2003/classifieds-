@@ -260,33 +260,57 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
 <!-- ── LIST PAGE ─────────────────────────────────────────────────────── -->
 <div class="page on" id="pg-list">
   <div class="bar">
-    <div class="logo">
-      <svg width="20" height="20" viewBox="0 0 100 100" style="vertical-align:-4px;margin-right:2px">
-        <clipPath id="flagClip"><circle cx="50" cy="50" r="48"/></clipPath>
-        <g clip-path="url(#flagClip)">
-          <rect x="0" y="0"  width="100" height="34" fill="#FF9933"/>
-          <rect x="0" y="33" width="100" height="34" fill="#FFFFFF"/>
-          <rect x="0" y="66" width="100" height="34" fill="#138808"/>
-          <circle cx="50" cy="50" r="10" fill="none" stroke="#000088" stroke-width="1.6"/>
-          <circle cx="50" cy="50" r="1.6" fill="#000088"/>
-          <g stroke="#000088" stroke-width="0.9">
-            <line x1="50" y1="40" x2="50" y2="60"/>
-            <line x1="40" y1="50" x2="60" y2="50"/>
-            <line x1="42.93" y1="42.93" x2="57.07" y2="57.07"/>
-            <line x1="42.93" y1="57.07" x2="57.07" y2="42.93"/>
-            <line x1="45.18" y1="40.72" x2="54.82" y2="59.28"/>
-            <line x1="40.72" y1="45.18" x2="59.28" y2="54.82"/>
-            <line x1="40.72" y1="54.82" x2="59.28" y2="45.18"/>
-            <line x1="45.18" y1="59.28" x2="54.82" y2="40.72"/>
-            <line x1="47.24" y1="40.13" x2="52.76" y2="59.87"/>
-            <line x1="40.13" y1="47.24" x2="59.87" y2="52.76"/>
-            <line x1="40.13" y1="52.76" x2="59.87" y2="47.24"/>
-            <line x1="47.24" y1="59.87" x2="52.76" y2="40.13"/>
-          </g>
+    <div class="logo" style="display:flex;flex-direction:column;align-items:center;gap:0;line-height:1.05">
+      <svg width="24" height="24" viewBox="0 0 100 100">
+        <!-- orange arc, swadeshi-style -->
+        <path d="M20 28 Q50 6 80 22" fill="none" stroke="#FF9933" stroke-width="7" stroke-linecap="round"/>
+        <path d="M74 16 L83 21 L76 28" fill="none" stroke="#FF9933" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+        <!-- folded hands, simplified silhouette -->
+        <path d="M50 30 L38 62 Q50 72 62 62 Z" fill="none" stroke="#7a7a7a" stroke-width="2.2" stroke-linejoin="round"/>
+        <path d="M50 30 L44 60" fill="none" stroke="#7a7a7a" stroke-width="1.6"/>
+        <path d="M50 30 L56 60" fill="none" stroke="#7a7a7a" stroke-width="1.6"/>
+        <!-- ashoka chakra -->
+        <circle cx="50" cy="52" r="10" fill="#0a0a0a" stroke="#000088" stroke-width="1.6"/>
+        <circle cx="50" cy="52" r="1.4" fill="#fff"/>
+        <g stroke="#fff" stroke-width="0.7">
+          <line x1="50" y1="43" x2="50" y2="61"/><line x1="41" y1="52" x2="59" y2="52"/>
+          <line x1="43.6" y1="45.6" x2="56.4" y2="58.4"/><line x1="43.6" y1="58.4" x2="56.4" y2="45.6"/>
+          <line x1="45.7" y1="43.7" x2="54.3" y2="60.3"/><line x1="41.7" y1="47.7" x2="58.3" y2="56.3"/>
+          <line x1="41.7" y1="56.3" x2="58.3" y2="47.7"/><line x1="45.7" y1="60.3" x2="54.3" y2="43.7"/>
         </g>
-        <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(0,0,0,.15)" stroke-width="1"/>
+        <!-- green arc, swadeshi-style -->
+        <path d="M22 76 Q50 92 78 78" fill="none" stroke="#138808" stroke-width="7" stroke-linecap="round"/>
+        <path d="M28 84 L19 79 L26 72" fill="none" stroke="#138808" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      Classifieds<b>Desk</b>
+      <div style="display:flex;align-items:center;gap:5px">
+        <svg width="16" height="16" viewBox="0 0 100 100">
+          <clipPath id="flagClip"><circle cx="50" cy="50" r="48"/></clipPath>
+          <g clip-path="url(#flagClip)">
+            <rect x="0" y="0"  width="100" height="34" fill="#FF9933"/>
+            <rect x="0" y="33" width="100" height="34" fill="#FFFFFF"/>
+            <rect x="0" y="66" width="100" height="34" fill="#138808"/>
+            <circle cx="50" cy="50" r="10" fill="none" stroke="#000088" stroke-width="1.6"/>
+            <circle cx="50" cy="50" r="1.6" fill="#000088"/>
+            <g stroke="#000088" stroke-width="0.9">
+              <line x1="50" y1="40" x2="50" y2="60"/>
+              <line x1="40" y1="50" x2="60" y2="50"/>
+              <line x1="42.93" y1="42.93" x2="57.07" y2="57.07"/>
+              <line x1="42.93" y1="57.07" x2="57.07" y2="42.93"/>
+              <line x1="45.18" y1="40.72" x2="54.82" y2="59.28"/>
+              <line x1="40.72" y1="45.18" x2="59.28" y2="54.82"/>
+              <line x1="40.72" y1="54.82" x2="59.28" y2="45.18"/>
+              <line x1="45.18" y1="59.28" x2="54.82" y2="40.72"/>
+              <line x1="47.24" y1="40.13" x2="52.76" y2="59.87"/>
+              <line x1="40.13" y1="47.24" x2="59.87" y2="52.76"/>
+              <line x1="40.13" y1="52.76" x2="59.87" y2="47.24"/>
+              <line x1="47.24" y1="59.87" x2="52.76" y2="40.13"/>
+            </g>
+          </g>
+          <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(0,0,0,.15)" stroke-width="1"/>
+        </svg>
+        Classifieds<b>Desk</b>
+      </div>
+      <small style="font-size:8px;color:var(--tx3);font-weight:600;letter-spacing:.03em">Make in India · Made in India</small>
     </div>
     <select class="statesel" id="stateSel" onchange="setState(this.value)">
       <option value="">🇮🇳 All India</option>
