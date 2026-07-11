@@ -154,6 +154,67 @@ function normalizeSubCategory(category, raw) {
   return text || 'General';
 }
 
+// ── State → known cities/towns/localities, for the "state" ad filter ──────
+// Ads only ever carry a free-text `location` (e.g. "Jubilee Hills",
+// "Chennai", "Kondapur") — there's no dedicated state column. So filtering
+// by state has to recognise city/locality names that belong to that state,
+// not just the literal state name. This list is deliberately weighted
+// toward Hyderabad/Telangana localities since that's where the vast
+// majority of current ads are (Deccan Chronicle Hyderabad edition), plus
+// major cities for every other state/UT so the filter still does something
+// sensible if ads from other editions get added later.
+const STATE_LOCALITIES = {
+  'Telangana': [
+    'telangana','hyderabad','secunderabad','jubilee hills','banjara hills','kondapur',
+    'gachibowli','kukatpally','miyapur','uppal','lb nagar','malkajgiri','shamshabad',
+    'kompally','bachupally','chikkadpally','himayatnagar','bowenpally','sangareddy',
+    'shankarpally','patancheru','vidyanagar','masabtank','musheerabad','rajendranagar',
+    'pocharam','mettuguda','padmarao nagar','chandanagar','attapur','manikonda',
+    'nizampet','alwal','yapral','tirumalagiri','bibinagar','shamirpet','medchal',
+    'sikh village','malakpet','balanagar','cherlapally','dhoolpally','gandimaisamma',
+    'hyderguda','narayanaguda','bhuvanagiri','karimnagar','warangal','nizamabad',
+    'khammam','adilabad','mahbubnagar','nalgonda','ameerpet','somajiguda','begumpet',
+    'madhapur','kokapet','tellapur','narsingi','moosapet','erragadda','sainikpuri',
+    'ecil','dilsukhnagar','abids','koti','tarnaka','ramanthapur','uppal bhagayath',
+    'shadnagar','ida bollaram','annojiguda','puppalguda',
+  ],
+  'Andhra Pradesh': ['andhra pradesh','vijayawada','visakhapatnam','vizag','guntur','tirupati','nellore','kurnool','rajahmundry','kakinada'],
+  'Tamil Nadu': ['tamil nadu','chennai','coimbatore','madurai','trichy','tiruchirappalli','salem','vellore','erode'],
+  'Karnataka': ['karnataka','bangalore','bengaluru','mysore','mysuru','mangalore','hubli','belgaum'],
+  'Maharashtra': ['maharashtra','mumbai','pune','nagpur','nashik','thane','aurangabad','navi mumbai'],
+  'Delhi': ['delhi','new delhi'],
+  'Kerala': ['kerala','kochi','cochin','thiruvananthapuram','trivandrum','kozhikode','calicut','kannur'],
+  'West Bengal': ['west bengal','kolkata','calcutta','howrah','durgapur','siliguri'],
+  'Gujarat': ['gujarat','ahmedabad','surat','vadodara','rajkot','gandhinagar'],
+  'Rajasthan': ['rajasthan','jaipur','jodhpur','udaipur','kota','ajmer'],
+  'Uttar Pradesh': ['uttar pradesh','lucknow','kanpur','noida','ghaziabad','agra','varanasi','allahabad','prayagraj'],
+  'Madhya Pradesh': ['madhya pradesh','bhopal','indore','jabalpur','gwalior'],
+  'Bihar': ['bihar','patna','gaya','muzaffarpur'],
+  'Punjab': ['punjab','chandigarh','ludhiana','amritsar','jalandhar'],
+  'Haryana': ['haryana','gurgaon','gurugram','faridabad','panipat'],
+  'Odisha': ['odisha','orissa','bhubaneswar','cuttack','rourkela'],
+  'Assam': ['assam','guwahati','dibrugarh'],
+  'Jharkhand': ['jharkhand','ranchi','jamshedpur','dhanbad'],
+  'Chhattisgarh': ['chhattisgarh','raipur','bhilai'],
+  'Uttarakhand': ['uttarakhand','dehradun','haridwar','rishikesh'],
+  'Himachal Pradesh': ['himachal pradesh','shimla','manali','dharamshala'],
+  'Jammu and Kashmir': ['jammu and kashmir','srinagar','jammu'],
+  'Ladakh': ['ladakh','leh'],
+  'Goa': ['goa','panaji','margao'],
+  'Tripura': ['tripura','agartala'],
+  'Manipur': ['manipur','imphal'],
+  'Meghalaya': ['meghalaya','shillong'],
+  'Nagaland': ['nagaland','kohima','dimapur'],
+  'Mizoram': ['mizoram','aizawl'],
+  'Sikkim': ['sikkim','gangtok'],
+  'Arunachal Pradesh': ['arunachal pradesh','itanagar'],
+  'Chandigarh': ['chandigarh'],
+  'Puducherry': ['puducherry','pondicherry'],
+  'Andaman and Nicobar Islands': ['andaman','nicobar','port blair'],
+  'Lakshadweep': ['lakshadweep'],
+  'Dadra and Nagar Haveli and Daman and Diu': ['dadra','nagar haveli','daman','diu'],
+};
+
 function normalizeAd(row, sno) {
   const rawCategory = row.category     || row['Category']            || '';
   const rawSub      = row.sub_category || row['Sub-Category']        || '';
@@ -414,11 +475,16 @@ app.get('/ads', async (req, res) => {
     if (date)        { cond.push('date_published = ?');              params.push(date); }
     if (dateFrom)    { cond.push('date_published >= ?');             params.push(dateFrom); }
     if (dateTo)      { cond.push('date_published <= ?');             params.push(dateTo); }
-    // NEW: filter by Indian state/UT — matches the state name against the
-    // free-text `location` field (ads don't have a dedicated state column,
-    // so this is a best-effort text match, e.g. location="Jubilee Hills,
-    // Hyderabad, Telangana" matches state=Telangana).
-    if (state)        { cond.push('LOWER(location) LIKE LOWER(?)');    params.push(`%${state}%`); }
+    // Filter by Indian state/UT — matches the location text against every
+    // known city/town/locality belonging to that state (see
+    // STATE_LOCALITIES above), not just the literal state name. So picking
+    // "Telangana" also matches ads whose location just says "Jubilee
+    // Hills" or "Kondapur" even though the word "Telangana" never appears.
+    if (state) {
+      const keywords = STATE_LOCALITIES[state] || [state.toLowerCase()];
+      cond.push(`(${keywords.map(() => 'LOWER(location) LIKE LOWER(?)').join(' OR ')})`);
+      keywords.forEach(k => params.push(`%${k}%`));
+    }
 
     if (search) {
       const t = `%${search}%`;
