@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -11,7 +12,32 @@
   --tx:#f0f0f0;--tx2:#aaa;--tx3:#666;
   --green:#1D9E75;--greenl:#1a3d2e;--amber:#EF9F27;--amberl:#3d2e1a;--red:#e24b4a
 }
-body{background:var(--bg);color:var(--tx);font-size:14px}
+/* ── Light / White theme ── */
+html[data-theme="light"]{
+  --bg:#f5f6f7;--bg2:#ffffff;--bg3:#eef0f1;--bg4:#e2e5e7;--bd:#dcdfe2;
+  --tx:#1a1a1a;--tx2:#5c6066;--tx3:#8a8f96;
+  --green:#178f68;--greenl:#e2f5ee;--amber:#c9791b;--amberl:#fbeedb;--red:#d1403f
+}
+/* ── Saffron (tricolor-inspired) theme ── */
+html[data-theme="saffron"]{
+  --bg:#1c1710;--bg2:#241d13;--bg3:#2e2517;--bg4:#3a2f1c;--bd:#4a3d24;
+  --tx:#fbf3e7;--tx2:#c9b89a;--tx3:#8a7d68;
+  --green:#138808;--greenl:#173d12;--amber:#FF9933;--amberl:#4a2e0c;--red:#e24b4a
+}
+/* ── Ocean theme ── */
+html[data-theme="ocean"]{
+  --bg:#0d1b2a;--bg2:#13273b;--bg3:#1b3350;--bg4:#234163;--bd:#2c4d70;
+  --tx:#eaf3fb;--tx2:#a9c3d9;--tx3:#6f8fa9;
+  --green:#2ec4b6;--greenl:#0f3a36;--amber:#f4a261;--amberl:#4a3016;--red:#e76f51
+}
+body{background:var(--bg);color:var(--tx);font-size:14px;transition:background .2s,color .2s}
+
+/* ── theme switcher control ── */
+.themesel{
+  background:var(--bg3);border:1px solid var(--bd);border-radius:8px;color:var(--tx2);
+  font-size:11px;padding:5px 8px;outline:none;cursor:pointer;max-width:120px
+}
+.themesel:focus{border-color:var(--green)}
 
 /* ── pages ── */
 .page{display:none}.page.on{display:block}
@@ -315,6 +341,12 @@ body{background:var(--bg);color:var(--tx);font-size:14px}
     <select class="statesel" id="stateSel" onchange="setState(this.value)">
       <option value="">🇮🇳 All India</option>
     </select>
+    <select class="themesel" id="themeSel" onchange="setTheme(this.value)">
+      <option value="dark">🌙 Dark</option>
+      <option value="light">☀️ Light</option>
+      <option value="saffron">🧡 Saffron</option>
+      <option value="ocean">🌊 Ocean</option>
+    </select>
     <div class="sw">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx3)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <input type="text" id="srch" placeholder="Search ads…" oninput="onSearch(this.value)"/>
@@ -521,7 +553,19 @@ const PER = 24;
 // an auth check on the /ads/bulk (or /ads) endpoint as well.
 const ADMIN_PASSCODE = 'dc-admin-2026';
 
-// ── Indian states & union territories, for the location filter ─────────────
+function setTheme(name){
+  document.documentElement.setAttribute('data-theme', name);
+  localStorage.setItem('cd_theme', name);
+  var sel = document.getElementById('themeSel');
+  if(sel) sel.value = name;
+}
+
+function loadTheme(){
+  var saved = localStorage.getItem('cd_theme') || 'dark';
+  setTheme(saved);
+}
+
+
 const INDIA_STATES = [
   'Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
   'Haryana','Himachal Pradesh','Jharkhand','Karnataka','Kerala','Madhya Pradesh',
@@ -1401,6 +1445,7 @@ function closeCsvToast(){
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────
+loadTheme();
 populateStateSelector();
 updateAdminUI();
 loadStats();
