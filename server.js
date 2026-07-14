@@ -810,7 +810,11 @@ app.get('/admin/repeat-advertisers', requireAdmin, async (req, res) => {
       SELECT
         phone,
         COUNT(*)                                   AS ad_count,
-        GROUP_CONCAT(DISTINCT category ORDER BY category SEPARATOR ', ') AS categories,
+        SUM(category = 'Property')                 AS property_count,
+        SUM(category = 'Matrimonial')               AS matrimonial_count,
+        SUM(category = 'Jobs')                      AS jobs_count,
+        SUM(category = 'Automotive')                AS automotive_count,
+        SUM(category NOT IN ('Property','Matrimonial','Jobs','Automotive')) AS other_count,
         MIN(date_published)                        AS first_seen,
         MAX(date_published)                        AS last_seen,
         SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY date_published DESC SEPARATOR '||'), '||', 3) AS sample_titles
@@ -824,14 +828,32 @@ app.get('/admin/repeat-advertisers', requireAdmin, async (req, res) => {
       LIMIT 200
     `, [days, minCount]);
 
-    const data = rows.map(r => ({
-      phone: r.phone,
-      adCount: r.ad_count,
-      categories: r.categories ? r.categories.split(', ') : [],
-      firstSeen: r.first_seen,
-      lastSeen: r.last_seen,
-      sampleTitles: r.sample_titles ? r.sample_titles.split('||') : [],
-    }));
+    const data = rows.map(r => {
+      // Per-category breakdown, e.g. { Property: 5, Matrimonial: 2 } —
+      // omits categories the advertiser never used, so the frontend can
+      // show "Property: 5, Matrimonial: 2" instead of a flat count that
+      // hides which category they're repeating in most.
+      const categoryBreakdown = {};
+      if (r.property_count)    categoryBreakdown.Property    = r.property_count;
+      if (r.matrimonial_count) categoryBreakdown.Matrimonial = r.matrimonial_count;
+      if (r.jobs_count)        categoryBreakdown.Jobs        = r.jobs_count;
+      if (r.automotive_count)  categoryBreakdown.Automotive  = r.automotive_count;
+      if (r.other_count)       categoryBreakdown.Other       = r.other_count;
+
+      return {
+        phone: r.phone,
+        adCount: r.ad_count,
+        categoryBreakdown,
+        // true if this number advertises across more than one category
+        // (e.g. Property AND Matrimonial) — worth flagging separately
+        // since a multi-category repeat advertiser is a stronger sales
+        // lead than someone just re-running the same single ad.
+        multiCategory: Object.keys(categoryBreakdown).length > 1,
+        firstSeen: r.first_seen,
+        lastSeen: r.last_seen,
+        sampleTitles: r.sample_titles ? r.sample_titles.split('||') : [],
+      };
+    });
 
     res.json({ days, minCount, data });
   } catch (err) {
@@ -859,9 +881,20 @@ app.get('/admin/advertiser/:phone', requireAdmin, async (req, res) => {
       ORDER BY date_published DESC
     `, [phone]);
 
+    // Per-category breakdown for this one number — e.g. {Property: 5,
+    // Matrimonial: 2} — so it's immediately clear if the same person is
+    // running ads across genuinely different categories (a stronger
+    // outreach signal than just "10 ads, all the same listing").
+    const categoryBreakdown = {};
+    rows.forEach(r => {
+      categoryBreakdown[r.category] = (categoryBreakdown[r.category] || 0) + 1;
+    });
+
     res.json({
       phone,
       totalAds: rows.length,
+      categoryBreakdown,
+      multiCategory: Object.keys(categoryBreakdown).length > 1,
       firstSeen: rows.length ? rows[rows.length - 1].date_published : null,
       lastSeen:  rows.length ? rows[0].date_published : null,
       ads: rows,
