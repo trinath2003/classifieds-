@@ -262,6 +262,7 @@ function normalizeAd(row, sno) {
     source:         row.source   || (row.scraped_at ? 'scraper' : 'seller'),
     status:         row.status   || 'active',
     scraped_at:     row.scraped_at || null,
+    created_at:     row.created_at || null,
     details,
   };
 }
@@ -382,6 +383,12 @@ async function _initDBOnce() {
     ['whatsapp',       "VARCHAR(60)   DEFAULT NULL"],
     ['email',          "VARCHAR(120)  DEFAULT NULL"],
     ['scraped_at',     "DATETIME      DEFAULT NULL"],
+    // NEW: exact moment this ad entered the database — distinct from
+    // date_published (the newspaper edition's date, which can be backdated
+    // via CSV import). Existing rows get filled with "now" at migration
+    // time as a reasonable stand-in, since their true upload time was never
+    // recorded.
+    ['created_at',     "DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP"],
     // NEW: JSON-as-text store for category-specific extra fields
     // (matrimonial/jobs/automotive). Using information_schema-based
     // addColumnIfMissing (not "ADD COLUMN IF NOT EXISTS") since that
@@ -514,7 +521,7 @@ app.get('/ads', async (req, res) => {
         id, category, sub_category, title, description,
         location, price, size_area, phone,
         whatsapp, email, source, status,
-        date_published, day_published, scraped_at, details
+        date_published, day_published, scraped_at, created_at, details
       FROM classified_ads
       ${where}
       ORDER BY ${orderBy}
@@ -538,7 +545,7 @@ app.get('/ads/:id', async (req, res) => {
         id, category, sub_category, title, description,
         location, price, size_area, phone,
         whatsapp, email, source, status,
-        date_published, day_published, scraped_at, details
+        date_published, day_published, scraped_at, created_at, details
       FROM classified_ads
       WHERE id = ? AND newspaper_name = 'Deccan Chronicle'
     `, [id]);
@@ -777,7 +784,94 @@ app.get('/stats', async (req, res) => {
   }
 });
 
-// ── GET /scrape ────────────────────────────────────────────────────────────
+// ── GET /admin/repeat-advertisers — admin-only, phone-based frequency intel ─
+// Business intent: find phone numbers that post classifieds repeatedly
+// within a time window, as candidates for a "switch to our flat monthly
+// rate" pitch (e.g. someone posting 10x/month at the newspaper's per-ad
+// rate may spend more than a single discounted package with us).
+//
+// IMPORTANT CAVEAT: we only know the ad's *sale price* (e.g. "₹28 Cr" for
+// a property) — not what the advertiser paid the newspaper to run the
+// classified. There's no per-ad billing data in this system. So this
+// endpoint only returns frequency counts; any "estimated spend" or
+// "savings" figure must be computed on the frontend using a cost-per-ad
+// value the admin enters themselves (their actual rate card), not a number
+// this endpoint invents.
+//
+// Query params:
+//   days      — lookback window in days (default 30)
+//   minCount  — only return phones with at least this many ads (default 3)
+app.get('/admin/repeat-advertisers', requireAdmin, async (req, res) => {
+  try {
+    const days     = Math.max(Number(req.query.days) || 30, 1);
+    const minCount = Math.max(Number(req.query.minCount) || 3, 1);
+
+    const [rows] = await db.query(`
+      SELECT
+        phone,
+        COUNT(*)                                   AS ad_count,
+        GROUP_CONCAT(DISTINCT category ORDER BY category SEPARATOR ', ') AS categories,
+        MIN(date_published)                        AS first_seen,
+        MAX(date_published)                        AS last_seen,
+        SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY date_published DESC SEPARATOR '||'), '||', 3) AS sample_titles
+      FROM classified_ads
+      WHERE newspaper_name = 'Deccan Chronicle'
+        AND phone IS NOT NULL AND phone != ''
+        AND date_published >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      GROUP BY phone
+      HAVING ad_count >= ?
+      ORDER BY ad_count DESC
+      LIMIT 200
+    `, [days, minCount]);
+
+    const data = rows.map(r => ({
+      phone: r.phone,
+      adCount: r.ad_count,
+      categories: r.categories ? r.categories.split(', ') : [],
+      firstSeen: r.first_seen,
+      lastSeen: r.last_seen,
+      sampleTitles: r.sample_titles ? r.sample_titles.split('||') : [],
+    }));
+
+    res.json({ days, minCount, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /admin/advertiser/:phone — admin-only, one number's full history ──
+// Drill-down for the Repeat Advertisers panel: given one phone number,
+// return every ad they've ever posted (all-time, not windowed), so an
+// admin can see exactly how many times "this specific person" has run
+// classifieds and what they were about before making an outreach call.
+app.get('/admin/advertiser/:phone', requireAdmin, async (req, res) => {
+  try {
+    const phone = String(req.params.phone || '').replace(/\D/g, '').slice(-10);
+    if (!/^[6-9]\d{9}$/.test(phone)) {
+      return res.status(400).json({ error: 'Invalid Indian mobile number' });
+    }
+    const [rows] = await db.query(`
+      SELECT id, category, sub_category, title, location, price,
+             date_published, day_published, source
+      FROM classified_ads
+      WHERE newspaper_name = 'Deccan Chronicle'
+        AND RIGHT(phone, 10) = ?
+      ORDER BY date_published DESC
+    `, [phone]);
+
+    res.json({
+      phone,
+      totalAds: rows.length,
+      firstSeen: rows.length ? rows[rows.length - 1].date_published : null,
+      lastSeen:  rows.length ? rows[0].date_published : null,
+      ads: rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // FIX: uses IST today, no longer passes UTC date
 app.get('/scrape', async (req, res) => {
   const date = req.query.date || todayIST();
