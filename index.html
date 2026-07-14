@@ -44,6 +44,15 @@ body{background:var(--bg);color:var(--tx);font-size:14px;transition:background .
 .nearbtn:hover{border-color:var(--green);color:var(--green)}
 .nearbtn.loading{opacity:.7;cursor:wait;border-color:var(--amber);color:var(--amber)}
 
+/* ── repeat-advertiser intelligence table ── */
+.inteltable{width:100%;border-collapse:collapse;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+.inteltable th{background:var(--bg3);color:var(--tx3);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:10px 12px;text-align:left}
+.inteltable td{padding:10px 12px;font-size:12px;border-top:1px solid var(--bd);vertical-align:top}
+.inteltable tr:hover td{background:var(--bg3)}
+.intel-savings{color:var(--green);font-weight:700}
+.intel-phone{font-weight:700;color:var(--tx)}
+.intel-cat{font-size:10px;background:var(--bg4);color:var(--tx2);padding:1px 7px;border-radius:99px;margin-right:3px;display:inline-block}
+
 /* ── pages ── */
 .page{display:none}.page.on{display:block}
 
@@ -382,6 +391,7 @@ html[data-theme="light"] .postbtn:hover{background:#4a4e54}
 
     <!-- Admin-only CSV import (hidden unless admin mode is on) -->
     <button class="csvbtn" id="csvBtn" onclick="document.getElementById('csvFile').click()">📁 Upload CSV</button>
+    <button class="csvbtn" id="intelBtn" onclick="goPage('pg-intel')" style="display:none">📊 Repeat Advertisers</button>
     <input type="file" id="csvFile" accept=".csv" style="display:none" onchange="handleCsvUpload(this.files[0])"/>
 
     <!-- Admin toggle -->
@@ -565,6 +575,45 @@ html[data-theme="light"] .postbtn:hover{background:#4a4e54}
   </div>
 </div>
 
+<!-- ── ADMIN: REPEAT ADVERTISERS INTELLIGENCE ─────────────────────────── -->
+<div class="page" id="pg-intel">
+  <div class="detbar">
+    <button class="backbtn" onclick="goPage('pg-list')">← Back</button>
+    <span style="font-size:12px;color:var(--tx3)">📊 Repeat Advertisers (admin only)</span>
+  </div>
+  <div class="main" style="max-width:1000px;margin:0 auto">
+    <div class="fcard" style="margin-bottom:16px">
+      <div style="font-size:11px;color:var(--tx3);line-height:1.7;margin-bottom:14px">
+        Finds phone numbers that posted classifieds repeatedly within a time window — candidates for
+        a "switch to our flat monthly package" outreach call. We don't have the newspaper's actual
+        per-ad billing rate, so enter your real per-ad cost below to get accurate estimated
+        spend/savings figures.
+      </div>
+      <div class="fg2">
+        <div class="frow"><label class="flab">Lookback window (days)</label><input class="fin" id="intelDays" type="number" value="30" min="1"/></div>
+        <div class="frow"><label class="flab">Minimum ads to flag</label><input class="fin" id="intelMinCount" type="number" value="3" min="1"/></div>
+      </div>
+      <div class="fg2">
+        <div class="frow"><label class="flab">Assumed cost per ad (₹, newspaper rate)</label><input class="fin" id="intelCostPerAd" type="number" value="1000" min="0"/></div>
+        <div class="frow"><label class="flab">Our flat package price (₹/month)</label><input class="fin" id="intelOurPrice" type="number" value="5000" min="0"/></div>
+      </div>
+      <button class="subbtn" onclick="loadRepeatAdvertisers()">Run analysis</button>
+    </div>
+
+    <!-- Drill-down: look up one specific phone number's full history -->
+    <div class="fcard" style="margin-bottom:16px">
+      <label class="flab" style="margin-bottom:8px;display:block">🔍 Look up a specific mobile number</label>
+      <div style="display:flex;gap:8px">
+        <input class="fin" id="intelLookupPhone" placeholder="e.g. 9876543210" onkeydown="if(event.key==='Enter')lookupAdvertiser()"/>
+        <button class="subbtn" style="width:auto;white-space:nowrap;margin-top:0" onclick="lookupAdvertiser()">Search</button>
+      </div>
+      <div id="intelLookupResult" style="margin-top:14px"></div>
+    </div>
+
+    <div id="intelResults"></div>
+  </div>
+</div>
+
 <!-- ── ADMIN LOGIN MODAL ─────────────────────────────────────────────── -->
 <div class="modal-ov" id="adminModal">
   <div class="modal-box">
@@ -691,6 +740,23 @@ let isAdmin = (localStorage.getItem('cd_admin') === '1');
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s){ var d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 function fmt(d){ if(!d)return'—'; return new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); }
+// Relative "uploaded X ago" label for created_at, distinct from the
+// newspaper's date_published — this tracks when the ad actually entered
+// the database.
+function timeAgo(d){
+  if(!d) return '';
+  var diffMs = Date.now() - new Date(d).getTime();
+  var mins = Math.floor(diffMs / 60000);
+  if(mins < 1)   return 'just now';
+  if(mins < 60)  return mins + 'm ago';
+  var hrs = Math.floor(mins / 60);
+  if(hrs < 24)   return hrs + 'h ago';
+  var days = Math.floor(hrs / 24);
+  if(days < 30)  return days + 'd ago';
+  var months = Math.floor(days / 30);
+  if(months < 12) return months + 'mo ago';
+  return Math.floor(months / 12) + 'y ago';
+}
 function icoFor(cat,sub){
   var c=(cat||'').toLowerCase(), s=(sub||'').toLowerCase();
   if(c==='matrimonial') return {cl:'im',e:'💍'};
@@ -878,7 +944,7 @@ function renderGrid(res){
     }
     h+='<button class="card-heart'+(isWished(a.id)?' on':'')+'" title="Add to wishlist" onclick="event.stopPropagation();toggleWish('+a.id+', this)">'+(isWished(a.id)?'❤️':'🤍')+'</button>';
     h+='<div class="card-top"><div class="cico '+ic.cl+'">'+ic.e+'</div>';
-    h+='<div class="cinfo"><div class="csno">#'+a.sno+' · '+esc(a.day_published)+', '+fmt(a.date_published)+'</div>';
+    h+='<div class="cinfo"><div class="csno">#'+a.sno+' · '+esc(a.day_published)+', '+fmt(a.date_published)+(a.created_at?' · <span title="Uploaded '+fmt(a.created_at)+'">'+timeAgo(a.created_at)+'</span>':'')+'</div>';
     h+='<div class="ctit">'+esc(a.title||'Untitled')+'</div>';
     h+='<div class="cloc">📍 '+esc(a.location||'—')+'</div>';
     h+='<div class="cprice">'+esc(a.price||'—')+'</div></div></div>';
@@ -1110,6 +1176,7 @@ async function openDet(sno){
     ['Location',    a.location],
     [priceRow.label, priceRow.value, priceRow.green],
     [sizeRow.label,  sizeRow.value],
+    ['Uploaded',    a.created_at ? (timeAgo(a.created_at)+' ('+fmt(a.created_at)+')') : ''],
   ];
 
   // Category-specific detail rows (matrimonial/jobs/automotive), skipping
@@ -1345,10 +1412,111 @@ function goPage(id){
     renderCategoryFields(document.getElementById('f-cat').value);
   }
   if(id==='pg-wishlist'){ renderWishlistPage(); }
+  if(id==='pg-intel'){
+    if(!isAdmin){ alert('Admin sign-in required.'); goPage('pg-list'); return; }
+    loadRepeatAdvertisers();
+  }
   window.scrollTo(0,0);
 }
 
-// ── Post ad form (public) ──────────────────────────────────────────────────
+// ── Admin: Repeat Advertisers intelligence ─────────────────────────────
+// Calls the admin-only /admin/repeat-advertisers endpoint (flags phone
+// numbers posting repeatedly within a window) and computes estimated
+// spend/savings using the admin's own entered cost-per-ad figure — the
+// server has no real newspaper billing data, only ad frequency.
+async function loadRepeatAdvertisers(){
+  var days       = Number(document.getElementById('intelDays').value) || 30;
+  var minCount   = Number(document.getElementById('intelMinCount').value) || 3;
+  var costPerAd  = Number(document.getElementById('intelCostPerAd').value) || 0;
+  var ourPrice   = Number(document.getElementById('intelOurPrice').value) || 0;
+  var resultsEl  = document.getElementById('intelResults');
+  resultsEl.innerHTML = '<div class="empty"><p>Analyzing…</p></div>';
+
+  try{
+    var res = await fetch(API+'/admin/repeat-advertisers?days='+days+'&minCount='+minCount, {
+      headers: { 'x-admin-key': ADMIN_PASSCODE }
+    });
+    var json = await res.json();
+    if(res.status===401){
+      resultsEl.innerHTML = '<div class="empty"><h3>Admin key rejected</h3><p>Make sure ADMIN_KEY on the server matches the admin passcode used here.</p></div>';
+      return;
+    }
+    if(!res.ok) throw new Error(json.error||'Request failed');
+    var rows = json.data || [];
+    if(!rows.length){
+      resultsEl.innerHTML = '<div class="empty"><h3>No repeat advertisers found</h3><p>Try a longer window or a lower minimum ad count.</p></div>';
+      return;
+    }
+
+    var totalPotentialSavings = 0;
+    var h = '<table class="inteltable"><thead><tr>'+
+      '<th>Phone</th><th>Ads posted</th><th>Categories</th><th>First / Last seen</th>'+
+      '<th>Est. current spend</th><th>Our package</th><th>Est. monthly savings</th><th>Recent ad titles</th>'+
+      '</tr></thead><tbody>';
+    rows.forEach(function(r){
+      var estSpend = r.adCount * costPerAd;
+      var savings  = estSpend - ourPrice;
+      totalPotentialSavings += Math.max(savings, 0);
+      h += '<tr>'+
+        '<td class="intel-phone" style="cursor:pointer;text-decoration:underline" onclick="document.getElementById(\'intelLookupPhone\').value=\''+esc(r.phone)+'\';lookupAdvertiser()" title="Click to see full history">'+esc(r.phone)+'</td>'+
+        '<td>'+r.adCount+'</td>'+
+        '<td>'+r.categories.map(function(c){ return '<span class="intel-cat">'+esc(c)+'</span>'; }).join('')+'</td>'+
+        '<td>'+fmt(r.firstSeen)+' → '+fmt(r.lastSeen)+'</td>'+
+        '<td>₹'+estSpend.toLocaleString('en-IN')+'</td>'+
+        '<td>₹'+ourPrice.toLocaleString('en-IN')+'</td>'+
+        '<td class="'+(savings>0?'intel-savings':'')+'">'+(savings>0?'₹'+savings.toLocaleString('en-IN')+' saved':'—')+'</td>'+
+        '<td style="max-width:220px;font-size:11px;color:var(--tx3)">'+r.sampleTitles.map(esc).join('; ')+'</td>'+
+        '</tr>';
+    });
+    h += '</tbody></table>';
+    h += '<div style="margin-top:12px;font-size:12px;color:var(--tx2)">'+
+      rows.length+' repeat advertiser(s) found · total estimated monthly savings if all switch: '+
+      '<b class="intel-savings">₹'+totalPotentialSavings.toLocaleString('en-IN')+'</b></div>';
+    resultsEl.innerHTML = h;
+  } catch(e){
+    resultsEl.innerHTML = '<div class="empty"><h3>Could not load analysis</h3><p>'+esc(e.message)+'</p></div>';
+  }
+}
+
+
+// Drill-down: full posting history for one specific phone number, so an
+// admin can confirm exactly how many times "this person" has advertised
+// before making an outreach call.
+async function lookupAdvertiser(){
+  var raw = document.getElementById('intelLookupPhone').value.trim();
+  var phone = raw.replace(/\D/g,'').slice(-10);
+  var el = document.getElementById('intelLookupResult');
+  if(!/^[6-9]\d{9}$/.test(phone)){
+    el.innerHTML = '<div class="empty"><p>Enter a valid 10-digit Indian mobile number.</p></div>';
+    return;
+  }
+  el.innerHTML = '<div class="empty"><p>Searching…</p></div>';
+  try{
+    var res = await fetch(API+'/admin/advertiser/'+phone, { headers:{'x-admin-key': ADMIN_PASSCODE} });
+    var data = await res.json();
+    if(res.status===401){ el.innerHTML = '<div class="empty"><p>Admin key rejected by server.</p></div>'; return; }
+    if(!res.ok) throw new Error(data.error||'Lookup failed');
+
+    if(!data.totalAds){
+      el.innerHTML = '<div class="empty"><p>No ads found for '+esc(phone)+'.</p></div>';
+      return;
+    }
+
+    var h = '<div style="font-size:13px;color:var(--tx);margin-bottom:8px">'+
+      '<b>'+esc(phone)+'</b> has posted <b class="intel-savings">'+data.totalAds+'</b> ad(s) total'+
+      (data.firstSeen ? ', from '+fmt(data.firstSeen)+' to '+fmt(data.lastSeen) : '')+'.</div>';
+    h += '<table class="inteltable"><thead><tr><th>Date</th><th>Category</th><th>Title</th><th>Location</th><th>Price</th></tr></thead><tbody>';
+    data.ads.forEach(function(a){
+      h += '<tr><td>'+fmt(a.date_published)+'</td><td>'+esc(a.category)+' / '+esc(a.sub_category)+'</td>'+
+        '<td>'+esc(a.title||'—')+'</td><td>'+esc(a.location||'—')+'</td><td>'+esc(a.price||'—')+'</td></tr>';
+    });
+    h += '</tbody></table>';
+    el.innerHTML = h;
+  } catch(e){
+    el.innerHTML = '<div class="empty"><p>'+esc(e.message)+'</p></div>';
+  }
+}
+
 async function submitAd(){
   var cat   = document.getElementById('f-cat').value;
   var title = document.getElementById('f-title').value.trim();
@@ -1428,18 +1596,21 @@ function confirmAdminLogin(){
 function updateAdminUI(){
   var adminBtn=document.getElementById('adminBtn');
   var csvBtn=document.getElementById('csvBtn');
+  var intelBtn=document.getElementById('intelBtn');
   var srcSidebar=document.getElementById('src-sidebar');
   var liveIndicator=document.getElementById('liveIndicator');
   if(isAdmin){
     adminBtn.textContent='🔓 Admin (on)';
     adminBtn.classList.add('active');
     csvBtn.classList.add('show');
+    intelBtn.style.display='flex';
     srcSidebar.style.display='block';
     liveIndicator.style.display='flex';
   } else {
     adminBtn.textContent='🔒 Admin';
     adminBtn.classList.remove('active');
     csvBtn.classList.remove('show');
+    intelBtn.style.display='none';
     srcSidebar.style.display='none';
     liveIndicator.style.display='none';
     // If a non-admin somehow had a source filter active (e.g. leftover
