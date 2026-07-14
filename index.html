@@ -1450,17 +1450,21 @@ async function loadRepeatAdvertisers(){
 
     var totalPotentialSavings = 0;
     var h = '<table class="inteltable"><thead><tr>'+
-      '<th>Phone</th><th>Ads posted</th><th>Categories</th><th>First / Last seen</th>'+
+      '<th>Phone</th><th>Ads posted</th><th>Category breakdown</th><th>First / Last seen</th>'+
       '<th>Est. current spend</th><th>Our package</th><th>Est. monthly savings</th><th>Recent ad titles</th>'+
       '</tr></thead><tbody>';
     rows.forEach(function(r){
       var estSpend = r.adCount * costPerAd;
       var savings  = estSpend - ourPrice;
       totalPotentialSavings += Math.max(savings, 0);
+      var catCells = Object.keys(r.categoryBreakdown||{}).map(function(c){
+        return '<span class="intel-cat">'+esc(c)+': '+r.categoryBreakdown[c]+'</span>';
+      }).join('');
+      if(r.multiCategory){ catCells += '<span class="intel-cat" style="background:var(--amberl);color:var(--amber)">⚠ multi-category</span>'; }
       h += '<tr>'+
         '<td class="intel-phone" style="cursor:pointer;text-decoration:underline" onclick="document.getElementById(\'intelLookupPhone\').value=\''+esc(r.phone)+'\';lookupAdvertiser()" title="Click to see full history">'+esc(r.phone)+'</td>'+
         '<td>'+r.adCount+'</td>'+
-        '<td>'+r.categories.map(function(c){ return '<span class="intel-cat">'+esc(c)+'</span>'; }).join('')+'</td>'+
+        '<td>'+catCells+'</td>'+
         '<td>'+fmt(r.firstSeen)+' → '+fmt(r.lastSeen)+'</td>'+
         '<td>₹'+estSpend.toLocaleString('en-IN')+'</td>'+
         '<td>₹'+ourPrice.toLocaleString('en-IN')+'</td>'+
@@ -1502,9 +1506,15 @@ async function lookupAdvertiser(){
       return;
     }
 
+    var catCells = Object.keys(data.categoryBreakdown||{}).map(function(c){
+      return '<span class="intel-cat">'+esc(c)+': '+data.categoryBreakdown[c]+'</span>';
+    }).join('');
     var h = '<div style="font-size:13px;color:var(--tx);margin-bottom:8px">'+
       '<b>'+esc(phone)+'</b> has posted <b class="intel-savings">'+data.totalAds+'</b> ad(s) total'+
-      (data.firstSeen ? ', from '+fmt(data.firstSeen)+' to '+fmt(data.lastSeen) : '')+'.</div>';
+      (data.firstSeen ? ', from '+fmt(data.firstSeen)+' to '+fmt(data.lastSeen) : '')+'.'+
+      (data.multiCategory ? ' <span style="color:var(--amber)">⚠ Advertises across multiple categories — strong outreach candidate.</span>' : '')+
+      '</div>';
+    h += '<div style="margin-bottom:10px">'+catCells+'</div>';
     h += '<table class="inteltable"><thead><tr><th>Date</th><th>Category</th><th>Title</th><th>Location</th><th>Price</th></tr></thead><tbody>';
     data.ads.forEach(function(a){
       h += '<tr><td>'+fmt(a.date_published)+'</td><td>'+esc(a.category)+' / '+esc(a.sub_category)+'</td>'+
